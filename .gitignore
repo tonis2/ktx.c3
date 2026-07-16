@@ -21,6 +21,15 @@
 *.a
 *.la
 *.lo
+# ...but DO track the bundled basis_universal static libs shipped per platform
+# (see native/build-basisu.sh). Consider git-lfs for these multi-MB binaries.
+!**/libbasisu.a
+!**/basisu.lib
+
+# basis_universal source + build output (fetched on demand by native/build-basisu.sh,
+# not vendored — only the CI lib-build job or a manual rebuild needs it)
+native/basis_universal/
+native/build/
 
 # Shared objects (inc. Windows DLLs)
 *.dll

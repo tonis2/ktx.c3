@@ -9,9 +9,10 @@ Vulkan-based engines and asset pipelines.
 - **KTX2 container** read + write, byte-accurate to the Khronos spec
   (header, level index, DFD, key/value metadata, mip padding, level ordering).
   Output validates clean against the official `ktx validate`.
-- **Supercompression:** Zstandard (via system `libzstd`) and ZLIB (pure C3,
-  stdlib deflate). BasisLZ files are rejected by design — for a Vulkan engine,
-  BCn + Zstd gives GPU-ready data without a transcode step.
+- **Supercompression:** Zstandard and ZLIB (pure C3, stdlib deflate) for
+  GPU-ready BCn. **ETC1S + BasisLZ** and transcoding to BC7/BC1/ETC2/ASTC are
+  provided by bundled `basis_universal` (see below) for small downloads and
+  mobile-GPU portability.
 - **GPU block compression, encoders + decoders in pure C3:**
   - **BC1, BC3, BC4, BC5** — decoders bit-identical to the basis_universal
     reference; encoders use bbox + least-squares refinement (stb_dxt approach).
@@ -25,7 +26,7 @@ Vulkan-based engines and asset pipelines.
 
 ```sh
 git submodule update --init --recursive   # fetch getopt.c3l + image.c3l
-c3c build                                  # needs libzstd installed (brew install zstd)
+c3c build                                 # links bundled libbasisu.a (no system libzstd needed)
 
 # color texture: BC7 + full mip chain + Zstd (default) supercompression
 build/ktx create --format bc7-srgb --mipmap -o albedo.ktx2 albedo.png
@@ -84,8 +85,9 @@ On the engine side, `container::read` hands back inflated, GPU-ready level
 payloads (`tex.image(level, layer, face)`) to feed straight into
 `vkCmdCopyBufferToImage`, `vk_format` matching `VkFormat` numerically.
 
-You still need `libzstd` installed on the system (`brew install zstd`,
-`apt install libzstd-dev`, etc.); the manifest handles the linker wiring.
+No system `libzstd` is needed: the bundled `basis_universal` static lib
+(`<target>/libbasisu.a`) provides both zstd and the ETC1S/BasisLZ codec, and the
+manifest links it plus a C++ runtime per platform.
 
 ## Tests
 
@@ -99,9 +101,35 @@ Cross-checks performed during development: all written files pass official
 read back pixel-exact; BCn/BC7 decoders verified bit-identical against
 basis_universal's unpackers.
 
+## ETC1S / BasisLZ (via basis_universal)
+
+ETC1S encode and BasisLZ transcoding are provided by
+[basis_universal](https://github.com/BinomialLLC/basis_universal), linked as a
+prebuilt static lib (`<target>/libbasisu.a`) and bound in `src/ktx/basis.c3`:
+
+```sh
+# encode an ETC1S + BasisLZ texture (transcodes to BC7/BC1/ETC2/ASTC at load)
+build/ktx create --format etc1s -o albedo.ktx2 albedo.png
+build/ktx info albedo.ktx2          # reports BasisLZ / model ETC1S
+build/ktx extract -o out.png albedo.ktx2   # transcodes ETC1S -> RGBA -> PNG
+```
+
+basis_universal is C++, so the final binary links a C++ runtime (handled by the
+manifest). Its bundled zstd also serves the container's Zstd path, so **no system
+libzstd is needed**. The static libs are prebuilt and bundled per platform, so
+this works out of the box. basis_universal itself is *not* vendored; to rebuild
+the libs from source (only needed to bump basis or add a platform), run the build
+script — it fetches basis at a pinned commit into `native/` (gitignored):
+
+```sh
+native/build-basisu.sh    # -> <target>/libbasisu.a
+```
+
+CI builds every platform this way via `.github/workflows/build-basisu.yml`.
+
 ## Scope / not implemented
 
-- BasisLZ/ETC1S and UASTC transcoding (huge C++ dependency; out of scope)
+- UASTC encode (the FFI covers ETC1S; UASTC transcode-in is wired, encode is TODO)
 - ASTC/ETC2 encoding (files with those formats can be read/inspected/extracted raw)
 - KTX v1 files, BC6H encode (HDR pipeline), 16-bit PNG input
 
