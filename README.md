@@ -10,7 +10,8 @@ Vulkan-based engines and asset pipelines.
   (header, level index, DFD, key/value metadata, mip padding, level ordering).
   Output validates clean against the official `ktx validate`.
 - **Supercompression:** Zstandard and ZLIB (pure C3, stdlib deflate) for
-  GPU-ready BCn. **ETC1S + BasisLZ** and transcoding to BC7/BC1/ETC2/ASTC are
+  GPU-ready BCn. **ETC1S + BasisLZ** and **UASTC 4x4 + Zstd** encode (2D, mip
+  chains, array layers, cubemaps) plus transcoding to BC7/BC1/ETC2/ASTC are
   provided by bundled `basis_universal` (see below) for small downloads and
   mobile-GPU portability.
 - **GPU block compression, encoders + decoders in pure C3:**
@@ -69,7 +70,9 @@ can add it as a normal C3 library dependency: drop it in a directory named
 "dependencies": [ "ktx" ]
 ```
 
-The manifest links `libzstd` for you (including Homebrew's path on macOS), then:
+The manifest links the bundled `libbasisu` (which supplies zstd and the
+ETC1S/UASTC codec) plus a C++ runtime for you, so a consumer builds out of the
+box with no system `libzstd`. Then:
 
 ```c3
 import ktx::container, ktx::vk, ktx::bc7, ktx::mipgen;
@@ -92,7 +95,7 @@ manifest links it plus a C++ runtime per platform.
 ## Tests
 
 ```sh
-c3c test                 # 55 unit tests: round-trips, KATs, alignment, DFD bytes
+c3c test                 # 59 unit tests: round-trips, KATs, alignment, DFD bytes
 sh test/cross-validate.sh   # optional: validates output with the official ktx tool
 ```
 
@@ -101,18 +104,35 @@ Cross-checks performed during development: all written files pass official
 read back pixel-exact; BCn/BC7 decoders verified bit-identical against
 basis_universal's unpackers.
 
-## ETC1S / BasisLZ (via basis_universal)
+## ETC1S / UASTC + BasisLZ (via basis_universal)
 
-ETC1S encode and BasisLZ transcoding are provided by
+ETC1S and UASTC 4x4 encoding plus BasisLZ/Zstd transcoding are provided by
 [basis_universal](https://github.com/BinomialLLC/basis_universal), linked as a
 prebuilt static lib (`<target>/libbasisu.a`) and bound in `src/ktx/basis.c3`:
 
 ```sh
-# encode an ETC1S + BasisLZ texture (transcodes to BC7/BC1/ETC2/ASTC at load)
+# ETC1S + BasisLZ: smallest downloads, codebook-based
 build/ktx create --format etc1s -o albedo.ktx2 albedo.png
-build/ktx info albedo.ktx2          # reports BasisLZ / model ETC1S
-build/ktx extract -o out.png albedo.ktx2   # transcodes ETC1S -> RGBA -> PNG
+
+# UASTC 4x4 + Zstd: higher quality, transcodes to BC7/ASTC near-losslessly
+build/ktx create --format uastc --quality 95 --effort 4 -o albedo.ktx2 albedo.png
+
+# non-color data (normals, masks) uses the linear variants
+build/ktx create --format uastc-linear -o normal.ktx2 normal.png
+
+# mip chains, array layers (N inputs), and cubemaps (--cube, 6 faces) all work
+build/ktx create --format etc1s --mipmap -o albedo.ktx2 albedo.png
+build/ktx create --format etc1s -o layers.ktx2 l0.png l1.png l2.png
+build/ktx create --cube --format uastc -o env.ktx2 px.png nx.png py.png ny.png pz.png nz.png
+
+build/ktx info albedo.ktx2          # reports scheme + DFD model (ETC1S / UASTC)
+build/ktx extract -o out.png albedo.ktx2                  # transcode -> RGBA -> PNG
+build/ktx extract --level 1 --face 2 -o f.png env.ktx2    # a specific level/layer/face
 ```
+
+`--quality` (0–100) and `--effort` (0–10) tune the encoder: for ETC1S they map
+to codebook size and compression level; for UASTC to the RDO quality and packing
+level (quality 100 = no RDO). Both default to `--quality 90 --effort 2`.
 
 basis_universal is C++, so the final binary links a C++ runtime (handled by the
 manifest). Its bundled zstd also serves the container's Zstd path, so **no system
@@ -129,8 +149,8 @@ CI builds every platform this way via `.github/workflows/build-basisu.yml`.
 
 ## Scope / not implemented
 
-- UASTC encode (the FFI covers ETC1S; UASTC transcode-in is wired, encode is TODO)
 - ASTC/ETC2 encoding (files with those formats can be read/inspected/extracted raw)
+- HDR basis formats (UASTC HDR 4x4 / ASTC HDR 6x6); only the LDR codecs are wired
 - KTX v1 files, BC6H encode (HDR pipeline), 16-bit PNG input
 
 Ported from KTX-Software and basis_universal (both Apache-2.0).

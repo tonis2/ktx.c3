@@ -12,11 +12,13 @@ faces (+X -X +Y -Y +Z -Z) of a cubemap with --cube.
 
 options:
   -f, --format <name>   target format (see 'ktx formats'), default rgba8-srgb
-                        use 'etc1s' for ETC1S + BasisLZ (transcodable)
+                        'etc1s'/'uastc' (+ '-linear') use basis_universal
   -m, --mipmap          generate a full mip chain
   -n, --normal-map      inputs are normal maps: mips are renormalized
                         (pairs well with --format bc5)
   -c, --cube            treat exactly 6 inputs as cubemap faces
+      --quality <0-100> etc1s/uastc encode quality (default 90)
+      --effort <0-10>   etc1s/uastc encode effort (default 2)
       --zstd <level>    Zstd supercompression level 1..22 (default: 3)
       --zlib            ZLIB supercompression instead of Zstd
       --raw             no supercompression
@@ -33,12 +35,16 @@ fn int cmd_create(String[] args)
 	bool zlib_flag;
 	bool raw_flag;
 	int zstd_level = 0;
+	int quality = 90;
+	int effort = 2;
 
 	int? end = opt::@parse(args,
 		"f", "format", &format_name,
 		"m", "mipmap", &mipmap,
 		"n", "normal-map", &normal_map,
 		"c", "cube", &cube,
+		null, "quality", &quality,
+		null, "effort", &effort,
 		null, "zstd", &zstd_level,
 		null, "zlib", &zlib_flag,
 		null, "raw", &raw_flag,
@@ -68,17 +74,18 @@ fn int cmd_create(String[] args)
 		return 1;
 	}
 
-	// ETC1S/BasisLZ is produced by basis_universal, which builds the whole KTX2
-	// (encode + container + supercompression) itself, so it bypasses the VkFormat
-	// per-level pipeline below.
-	if (format_name == "etc1s")
+	// ETC1S/UASTC + BasisLZ is produced by basis_universal, which builds the whole
+	// KTX2 (encode + container + supercompression) itself, so it bypasses the
+	// VkFormat per-level pipeline below.
+	uint bfmt;
+	bool bsrgb;
+	if (is_basis_format(format_name, &bfmt, &bsrgb))
 	{
-		if (cube || inputs.len != 1)
-		{
-			io::eprintn("error: --format etc1s currently supports a single 2D image");
-			return 1;
-		}
-		if (catch err = create_etc1s(inputs[0], output, mipmap))
+		basis::TexType type = cube
+			? basis::TexType.CUBE
+			: (inputs.len > 1 ? basis::TexType.ARRAY : basis::TexType.D2);
+		basis::EncodeOptions opts = { .quality = quality, .effort = effort, .srgb = bsrgb, .mipmaps = mipmap };
+		if (catch err = create_basis(inputs, output, format_name, bfmt, type, opts))
 		{
 			io::eprintfn("error: %s", err);
 			return 1;
@@ -172,13 +179,55 @@ fn void? create_texture(uint format, vk::FormatInfo fi, String[] inputs, String 
 		scheme == container::Scheme.NONE ? "uncompressed" : (scheme == container::Scheme.ZSTD ? "zstd" : "zlib"));
 }
 
-<* Encode a single image to an ETC1S + BasisLZ KTX2 via basis_universal. *>
-fn void? create_etc1s(String input, String output, bool mipmap) @local => @pool()
+<*
+ Recognize the basis_universal format aliases and decode them into the encoder
+ format id (ETC1S / UASTC_4X4) plus an sRGB flag. Returns false for anything
+ handled by the VkFormat pipeline. "-linear" selects linear colorspace; the
+ bare name is sRGB (color).
+*>
+fn bool is_basis_format(String name, uint* fmt, bool* srgb) @local
 {
-	image::Image img = load_image(tmem, input)!;
-	basis::EncodeOptions opts = { .quality = 90, .effort = 2, .srgb = true, .mipmaps = mipmap };
-	char[] ktx2 = basis::encode_etc1s(tmem, img.pixels, img.width, img.height, opts)!;
+	switch (name)
+	{
+		case "etc1s":         *fmt = basis::ETC1S;     *srgb = true;  return true;
+		case "etc1s-linear":  *fmt = basis::ETC1S;     *srgb = false; return true;
+		case "uastc":         *fmt = basis::UASTC_4X4; *srgb = true;  return true;
+		case "uastc-linear":  *fmt = basis::UASTC_4X4; *srgb = false; return true;
+		default:              return false;
+	}
+}
+
+<* Encode one or more images to an ETC1S/UASTC + BasisLZ KTX2 via basis_universal. *>
+fn void? create_basis(String[] inputs, String output, String format_name, uint fmt, basis::TexType type, basis::EncodeOptions opts) @local => @pool()
+{
+	// Load every input up front and check they agree on dimensions.
+	image::Image[] images = alloc::new_array(tmem, image::Image, inputs.len);
+	char[][] pixels = alloc::new_array(tmem, char[], inputs.len);
+	foreach (i, path : inputs)
+	{
+		images[i] = load_image(tmem, path)!;
+		if (images[i].width != images[0].width || images[i].height != images[0].height)
+		{
+			io::eprintfn("input %s is %dx%d, expected %dx%d",
+				path, images[i].width, images[i].height, images[0].width, images[0].height);
+			return INPUT_MISMATCH~;
+		}
+		pixels[i] = images[i].pixels;
+	}
+
+	uint w = images[0].width;
+	uint h = images[0].height;
+	char[] ktx2 = basis::encode(tmem, fmt, pixels, w, h, type, opts)!;
 	file::save(output, ktx2)!;
-	io::printfn("wrote %s: ETC1S + BasisLZ %dx%d, %s", output, img.width, img.height,
-		mipmap ? "mipmapped" : "single level");
+
+	String scheme = fmt == basis::UASTC_4X4 ? "Zstd" : "BasisLZ";
+	String shape;
+	switch (type)
+	{
+		case CUBE:  shape = "cubemap (6 faces)";
+		case ARRAY: shape = "array";
+		default:    shape = "2D";
+	}
+	io::printfn("wrote %s: %s + %s %dx%d, %s%s", output, format_name, scheme, w, h,
+		opts.mipmaps ? "mipmapped " : "", shape);
 }

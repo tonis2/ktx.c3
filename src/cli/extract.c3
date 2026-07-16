@@ -70,9 +70,11 @@ fn void? extract(String input, String output, uint level, uint layer, uint face,
 		return container::BAD_IDENTIFIER~;
 	}
 
-	// BasisLZ (scheme 1): transcode via basis_universal rather than the VkFormat
-	// decode path (which has no ETC1S decoder).
-	if (util::rd32(data, 44) == 1)
+	// vkFormat == VK_FORMAT_UNDEFINED (0) marks an ETC1S/UASTC basis payload
+	// (BasisLZ scheme 1 or Zstd scheme 2, with the real format in the DFD).
+	// Transcode it via basis_universal rather than the VkFormat decode path,
+	// which has no ETC1S/UASTC decoder.
+	if (util::rd32(data, 12) == 0)
 	{
 		extract_basis(data, output, level, layer, face)!;
 		return;
@@ -107,13 +109,24 @@ fn void? extract(String input, String output, uint level, uint layer, uint face,
 	io::printfn("wrote %s (%dx%d from %s level %d)", output, w, h, vk::name(tex.vk_format), level);
 }
 
-<* Transcode one image of an ETC1S/BasisLZ file to RGBA8 and write it as PNG. *>
+<* Transcode one image of an ETC1S/UASTC BasisLZ file to RGBA8 and write it as PNG. *>
 fn void? extract_basis(char[] data, String output, uint level, uint layer, uint face) @local
 {
-	uint n = basis::levels(data)!;
-	if (level >= n)
+	basis::Info bi = basis::info(data)!;
+	uint layers = max(bi.layers, 1u);   // KTX2 reports 0 layers for a plain 2D texture
+	if (level >= bi.levels)
 	{
-		io::eprintfn("level %d out of range (file has %d)", level, n);
+		io::eprintfn("level %d out of range (file has %d)", level, bi.levels);
+		return BAD_ARGUMENTS~;
+	}
+	if (layer >= layers)
+	{
+		io::eprintfn("layer %d out of range (file has %d)", layer, layers);
+		return BAD_ARGUMENTS~;
+	}
+	if (face >= bi.faces)
+	{
+		io::eprintfn("face %d out of range (file has %d)", face, bi.faces);
 		return BAD_ARGUMENTS~;
 	}
 	basis::Transcoded t = basis::transcode(tmem, data, level, layer, face, basis::TF_RGBA32, 4)!;
@@ -125,5 +138,5 @@ fn void? extract_basis(char[] data, String output, uint level, uint layer, uint 
 		.pixels = t.data,
 	};
 	png::save_file(&img, output, tmem)!;
-	io::printfn("wrote %s (%dx%d from ETC1S/BasisLZ level %d)", output, t.width, t.height, level);
+	io::printfn("wrote %s (%dx%d from basis level %d, layer %d, face %d)", output, t.width, t.height, level, layer, face);
 }

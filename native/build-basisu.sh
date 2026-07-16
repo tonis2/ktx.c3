@@ -39,6 +39,19 @@ if [ -z "$triple" ]; then
 fi
 OUT="$REPO_ROOT/$triple"
 
+# On macOS, pin a low deployment target so the archive's minOS matches (or is
+# lower than) whatever c3c links against. Otherwise the runner's SDK stamps the
+# .o files with the host's very recent minOS and every link prints a cosmetic
+# "object file was built for newer macOS version" warning.
+MACOS_MIN=11.0
+CMAKE_OSX=""
+MAC_MIN_FLAG=""
+if [ "${triple%%-*}" = "macos" ]; then
+  CMAKE_OSX="-DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_MIN"
+  MAC_MIN_FLAG="-mmacosx-version-min=$MACOS_MIN"
+  export MACOSX_DEPLOYMENT_TARGET="$MACOS_MIN"
+fi
+
 # Fetch basis_universal at the pinned commit (blobless partial clone keeps it
 # lighter). Re-run is cheap: it just checks out the pinned commit again.
 if [ ! -d "$SRC/.git" ]; then
@@ -49,12 +62,12 @@ git -C "$SRC" checkout -q "$BASIS_COMMIT"
 
 # Build the encoder static lib (bundles the transcoder + zstd; no examples/OpenCL).
 cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
-  -DBASISU_EXAMPLES=OFF -DBASISU_OPENCL=OFF -DBASISU_STATIC=ON
+  -DBASISU_EXAMPLES=OFF -DBASISU_OPENCL=OFF -DBASISU_STATIC=ON $CMAKE_OSX
 cmake --build "$BUILD" --target basisu_encoder -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
 # Compile the two C-API wrappers with the encoder's flags and archive everything
 # into one libbasisu.a.
-CXXFLAGS="-std=c++17 -O2 -fno-exceptions -fno-rtti -DBASISD_SUPPORT_KTX2_ZSTD=1"
+CXXFLAGS="-std=c++17 -O2 -fno-exceptions -fno-rtti -DBASISD_SUPPORT_KTX2_ZSTD=1 $MAC_MIN_FLAG"
 INCLUDES="-I$SRC -I$SRC/encoder -I$SRC/transcoder -I$SRC/zstd"
 "${CXX:-c++}" $CXXFLAGS $INCLUDES -c "$SRC/encoder/basisu_wasm_api.cpp"            -o "$BUILD/bu_api.o"
 "${CXX:-c++}" $CXXFLAGS $INCLUDES -c "$SRC/encoder/basisu_wasm_transcoder_api.cpp" -o "$BUILD/bt_api.o"
