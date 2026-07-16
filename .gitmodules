@@ -1,0 +1,6 @@
+[submodule "lib/getopt.c3l"]
+	path = lib/getopt.c3l
+	url = https://github.com/NotsoanoNimus/getopt.c3l.git
+[submodule "lib/image.c3l"]
+	path = lib/image.c3l
+	url = https://github.com/tonis2/image.c3.git
