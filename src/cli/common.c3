@@ -60,6 +60,7 @@ fn void print_formats()
 	{
 		io::printfn("  %-12s -> %s", a.alias_name, vk::name(a.format));
 	}
+	io::printn("  etc1s        -> ETC1S + BasisLZ (transcodes to BC7/BC1/ETC2/ASTC at load)");
 }
 
 <* Load a PNG or JPEG (detected by magic bytes) as an 8-bit RGBA image. *>

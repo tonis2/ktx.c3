@@ -13,13 +13,12 @@
   "build-dir": "build",
   // Output location, relative to project file.
   "output": "build",
-  "linked-libraries": [ "zstd" ],
-  // Where the linker looks for external libraries (e.g. libzstd).
-  // On macOS, Homebrew installs libzstd outside the default linker path:
-  //   Apple Silicon -> /opt/homebrew/opt/zstd/lib, Intel -> /usr/local/opt/zstd/lib.
-  // Paths that don't exist on a given host (e.g. on Linux, where libzstd is in
-  // the default path) are skipped with a harmless "search path not found" warning.
-  "linker-search-paths": [ "/opt/homebrew/opt/zstd/lib", "/usr/local/opt/zstd/lib" ],
+  // basis_universal (ETC1S/UASTC + BasisLZ, via src/ktx/basis.c3) ships a
+  // prebuilt static lib per platform under <arch>/libbasisu.a. It bundles a full
+  // zstd, which also satisfies the container's ZSTD_* calls, so no separate
+  // system libzstd is needed. "c++" links the C++ runtime basis_universal needs.
+  "linked-libraries": [ "basisu", "c++" ],
+  "linker-search-paths": [ "macos-aarch64" ],
   "targets": {
     "ktx": {
       // Executable or library.

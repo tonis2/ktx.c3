@@ -1,0 +1,65 @@
+# Builds the bundled basis_universal static library (libbasisu.a / basisu.lib)
+# for every platform the manifest supports, and uploads them as artifacts. A
+# maintainer commits the artifacts into the matching <target>/ directories (or
+# a release), so consumers of the ktx.c3l library link ETC1S/BasisLZ out of the
+# box without a C++ build.
+#
+# basis_universal is NOT a submodule of this repo (it's large and only needed
+# here); each runner fetches it at the pinned commit via native/build-basisu.sh.
+name: build-basisu
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - native/build-basisu.sh
+      - .github/workflows/build-basisu.yml
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,         triple: macos-aarch64 }
+          - { os: macos-13,         triple: macos-x64 }
+          - { os: ubuntu-latest,    triple: linux-x64 }
+          - { os: ubuntu-24.04-arm, triple: linux-aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4          # no submodules: the script fetches basis
+      - name: Build libbasisu.a
+        run: ./native/build-basisu.sh ${{ matrix.triple }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libbasisu-${{ matrix.triple }}
+          path: ${{ matrix.triple }}/libbasisu.a
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build basisu.lib (MSVC)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pinned commit is the single source of truth in the build script.
+          COMMIT=$(grep -oE 'BASIS_COMMIT="[0-9a-f]+"' native/build-basisu.sh | cut -d'"' -f2)
+          SRC=native/basis_universal
+          git clone --filter=blob:none https://github.com/BinomialLLC/basis_universal.git "$SRC"
+          git -C "$SRC" fetch --depth 1 origin "$COMMIT"
+          git -C "$SRC" checkout -q "$COMMIT"
+          cmake -S "$SRC" -B native/build \
+            -DCMAKE_BUILD_TYPE=Release -DBASISU_EXAMPLES=OFF -DBASISU_OPENCL=OFF -DBASISU_STATIC=ON
+          cmake --build native/build --target basisu_encoder --config Release
+          # Compile the two C-API wrappers and merge into basisu.lib.
+          cl //nologo //O2 //std:c++17 //DBASISD_SUPPORT_KTX2_ZSTD=1 \
+            //I "$SRC" //I "$SRC/encoder" //I "$SRC/transcoder" //I "$SRC/zstd" \
+            //c "$SRC/encoder/basisu_wasm_api.cpp" "$SRC/encoder/basisu_wasm_transcoder_api.cpp"
+          mkdir -p windows-x64
+          lib //nologo //OUT:windows-x64/basisu.lib \
+            native/build/Release/basisu_encoder.lib basisu_wasm_api.obj basisu_wasm_transcoder_api.obj
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libbasisu-windows-x64
+          path: windows-x64/basisu.lib

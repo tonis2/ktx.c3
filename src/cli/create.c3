@@ -1,9 +1,9 @@
 // `ktx create` — build a KTX2 texture from PNG/JPEG images.
 module ktx::cli;
-import ktx::container, ktx::vk, ktx::mipgen;
+import ktx::container, ktx::vk, ktx::mipgen, ktx::basis;
 import image;
 import opt;
-import std::io;
+import std::io, std::io::file;
 
 const CREATE_HELP = `usage: ktx create [options] -o <output.ktx2> <input.png|jpg> [more inputs]
 
@@ -12,6 +12,7 @@ faces (+X -X +Y -Y +Z -Z) of a cubemap with --cube.
 
 options:
   -f, --format <name>   target format (see 'ktx formats'), default rgba8-srgb
+                        use 'etc1s' for ETC1S + BasisLZ (transcodable)
   -m, --mipmap          generate a full mip chain
   -n, --normal-map      inputs are normal maps: mips are renormalized
                         (pairs well with --format bc5)
@@ -65,6 +66,24 @@ fn int cmd_create(String[] args)
 	{
 		io::eprintfn("error: --cube needs exactly 6 inputs, got %d", inputs.len);
 		return 1;
+	}
+
+	// ETC1S/BasisLZ is produced by basis_universal, which builds the whole KTX2
+	// (encode + container + supercompression) itself, so it bypasses the VkFormat
+	// per-level pipeline below.
+	if (format_name == "etc1s")
+	{
+		if (cube || inputs.len != 1)
+		{
+			io::eprintn("error: --format etc1s currently supports a single 2D image");
+			return 1;
+		}
+		if (catch err = create_etc1s(inputs[0], output, mipmap))
+		{
+			io::eprintfn("error: %s", err);
+			return 1;
+		}
+		return 0;
 	}
 
 	uint? format = parse_format(format_name);
@@ -151,4 +170,15 @@ fn void? create_texture(uint format, vk::FormatInfo fi, String[] inputs, String 
 		cube ? 6 : (inputs.len > 1 ? inputs.len : 1),
 		cube ? "faces" : "layer(s)",
 		scheme == container::Scheme.NONE ? "uncompressed" : (scheme == container::Scheme.ZSTD ? "zstd" : "zlib"));
+}
+
+<* Encode a single image to an ETC1S + BasisLZ KTX2 via basis_universal. *>
+fn void? create_etc1s(String input, String output, bool mipmap) @local => @pool()
+{
+	image::Image img = load_image(tmem, input)!;
+	basis::EncodeOptions opts = { .quality = 90, .effort = 2, .srgb = true, .mipmaps = mipmap };
+	char[] ktx2 = basis::encode_etc1s(tmem, img.pixels, img.width, img.height, opts)!;
+	file::save(output, ktx2)!;
+	io::printfn("wrote %s: ETC1S + BasisLZ %dx%d, %s", output, img.width, img.height,
+		mipmap ? "mipmapped" : "single level");
 }
