@@ -2,8 +2,7 @@
 
 KTX2 texture encoding/decoding in pure C3 — a game-development-focused port
 of [KTX-Software](https://github.com/KhronosGroup/KTX-Software) for
-Vulkan-based engines and asset pipelines (e.g. embedding textures/normal maps
-in a glTF exporter).
+Vulkan-based engines and asset pipelines.
 
 ## What it does
 
