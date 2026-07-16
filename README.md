@@ -24,7 +24,8 @@ Vulkan-based engines and asset pipelines.
 ## CLI
 
 ```sh
-c3c build
+git submodule update --init --recursive   # fetch getopt.c3l + image.c3l
+c3c build                                  # needs libzstd installed (brew install zstd)
 
 # color texture: BC7 + full mip chain + Zstd (default) supercompression
 build/ktx create --format bc7-srgb --mipmap -o albedo.ktx2 albedo.png
@@ -56,8 +57,18 @@ compression in shipping builds, `--raw` to disable.
 
 ## Using the library from another C3 project (e.g. a glTF exporter)
 
-The `ktx::*` modules have no dependency on the CLI. Add this repo's `src/ktx`
-sources (plus `lib/image.c3l` if you want image loading) to your project and:
+The `ktx::*` modules have no dependency on the CLI or on `image`/`getopt` —
+they use only the standard library. This repo ships a `manifest.json`, so you
+can add it as a normal C3 library dependency: drop it in a directory named
+`ktx.c3l` on your `dependency-search-paths` (e.g. as a git submodule at
+`lib/ktx.c3l`) and list `"ktx"` in your `dependencies`:
+
+```json
+"dependency-search-paths": [ "lib" ],
+"dependencies": [ "ktx" ]
+```
+
+The manifest links `libzstd` for you (including Homebrew's path on macOS), then:
 
 ```c3
 import ktx::container, ktx::vk, ktx::bc7, ktx::mipgen;
@@ -73,7 +84,8 @@ On the engine side, `container::read` hands back inflated, GPU-ready level
 payloads (`tex.image(level, layer, face)`) to feed straight into
 `vkCmdCopyBufferToImage`, `vk_format` matching `VkFormat` numerically.
 
-Requires `libzstd` at link time (`"linked-libraries": ["zstd"]`).
+You still need `libzstd` installed on the system (`brew install zstd`,
+`apt install libzstd-dev`, etc.); the manifest handles the linker wiring.
 
 ## Tests
 
