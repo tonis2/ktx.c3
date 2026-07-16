@@ -14,6 +14,12 @@
   // Output location, relative to project file.
   "output": "build",
   "linked-libraries": [ "zstd" ],
+  // Where the linker looks for external libraries (e.g. libzstd).
+  // On macOS, Homebrew installs libzstd outside the default linker path:
+  //   Apple Silicon -> /opt/homebrew/opt/zstd/lib, Intel -> /usr/local/opt/zstd/lib.
+  // Paths that don't exist on a given host (e.g. on Linux, where libzstd is in
+  // the default path) are skipped with a harmless "search path not found" warning.
+  "linker-search-paths": [ "/opt/homebrew/opt/zstd/lib", "/usr/local/opt/zstd/lib" ],
   "targets": {
     "ktx": {
       // Executable or library.

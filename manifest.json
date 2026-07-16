@@ -1,0 +1,35 @@
+{
+  // Library name. Consumers add "ktx" to their project.json "dependencies"
+  // (with this repo on a "dependency-search-paths" entry) and then
+  // `import ktx::container, ktx::vk, ktx::bc7, ...`.
+  "provides": "ktx",
+  // Only the ktx::* modules are part of the library — the CLI (src/cli, src/main.c3)
+  // is intentionally excluded so consumers don't pull in getopt/image.
+  "sources": [ "src/ktx/**" ],
+  // No C3 library dependencies: ktx::* uses only the standard library. Image
+  // loading (lib/image.c3l) is a CLI-only concern; the library works on raw pixels.
+  "dependencies": [],
+  // Every target links the system libzstd (ZSTD_compress/ZSTD_decompress).
+  // macOS targets also add Homebrew's per-arch lib dir to the linker search path.
+  "targets": {
+    "macos-aarch64": {
+      "linked-libraries": [ "zstd" ],
+      "link-args": [ "-L/opt/homebrew/opt/zstd/lib" ]
+    },
+    "macos-x64": {
+      "linked-libraries": [ "zstd" ],
+      "link-args": [ "-L/usr/local/opt/zstd/lib" ]
+    },
+    "linux-x64": {
+      "linked-libraries": [ "zstd" ]
+    },
+    "linux-aarch64": {
+      "linked-libraries": [ "zstd" ]
+    },
+    "windows-x64": {
+      // Provide libzstd yourself (e.g. vcpkg) and point the linker at it via
+      // your project.json "linker-search-paths".
+      "linked-libraries": [ "zstd" ]
+    }
+  }
+}
