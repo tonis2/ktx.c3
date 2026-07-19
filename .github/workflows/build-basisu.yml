@@ -134,10 +134,13 @@ jobs:
       - name: Build ktx.dll
         shell: bash
         run: |
+          ls -la windows-x64/
           # c3c's -L/-l don't reach lld-link as /libpath:, and lld-link runs
-          # from a different cwd — hand it an absolute Windows-style path.
-          c3c dynamic-lib src/ktx/*.c3 src/capi/*.c3 -O2 --no-headers \
-            -z "$(cygpath -w "$PWD/windows-x64/basisu.lib")" -o windows-x64/ktx
+          # from its own cwd — pass a Windows-style absolute path expanded by
+          # the runner itself (cygpath output risks a stray \r in the arg).
+          # -vv prints the linker invocation for diagnosis.
+          c3c dynamic-lib src/ktx/*.c3 src/capi/*.c3 -O2 --no-headers -vv \
+            -z '${{ github.workspace }}\windows-x64\basisu.lib' -o windows-x64/ktx
       - name: Smoke-test the C API
         shell: bash
         run: python test/capi_smoke.py windows-x64/ktx.dll
