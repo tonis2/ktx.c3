@@ -44,6 +44,7 @@ jobs:
         with:
           name: libbasisu-${{ matrix.triple }}
           path: ${{ matrix.triple }}/libbasisu.a
+          if-no-files-found: error
 
       - name: Install c3c
         if: matrix.c3c
@@ -65,6 +66,7 @@ jobs:
         with:
           name: libktx-${{ matrix.triple }}
           path: ${{ matrix.triple }}/ktx.*
+          if-no-files-found: error
 
   # Intel macOS runners (macos-13) are retired and c3c ships no x86_64 mac
   # binary, so the whole macos-x64 target is cross-compiled from arm64:
@@ -80,6 +82,7 @@ jobs:
         with:
           name: libbasisu-macos-x64
           path: macos-x64/libbasisu.a
+          if-no-files-found: error
       - name: Install c3c
         run: |
           curl -fsSL -o /tmp/c3-macos.zip "https://github.com/c3lang/c3c/releases/download/${C3C_RELEASE}/c3-macos.zip"
@@ -91,6 +94,7 @@ jobs:
         with:
           name: libktx-macos-x64
           path: macos-x64/ktx.dylib
+          if-no-files-found: error
 
   windows:
     runs-on: windows-latest
@@ -113,17 +117,22 @@ jobs:
           cmake -S "$SRC" -B native/build \
             -DCMAKE_BUILD_TYPE=Release -DBASISU_EXAMPLES=OFF -DBASISU_OPENCL=OFF -DBASISU_STATIC=ON
           cmake --build native/build --target basisu_encoder --config Release
-          # Compile the two C-API wrappers and merge into basisu.lib.
-          cl //nologo //O2 //MD //std:c++17 //DBASISD_SUPPORT_KTX2_ZSTD=1 \
-            //I "$SRC" //I "$SRC/encoder" //I "$SRC/transcoder" //I "$SRC/zstd" \
-            //c "$SRC/encoder/basisu_wasm_api.cpp" "$SRC/encoder/basisu_wasm_transcoder_api.cpp"
+          # Compile the two C-API wrappers and merge into basisu.lib. MSVC
+          # options use dash form: git-bash leaves //X args with colons
+          # unconverted (lib.exe saw '//OUT:...' and ignored it), while
+          # dash-form options are never mangled.
+          cl -nologo -O2 -MD -std:c++17 -DBASISD_SUPPORT_KTX2_ZSTD=1 \
+            -I "$SRC" -I "$SRC/encoder" -I "$SRC/transcoder" -I "$SRC/zstd" \
+            -c "$SRC/encoder/basisu_wasm_api.cpp" "$SRC/encoder/basisu_wasm_transcoder_api.cpp"
           mkdir -p windows-x64
-          lib //nologo //OUT:windows-x64/basisu.lib \
+          lib -nologo "-OUT:windows-x64/basisu.lib" \
             native/build/Release/basisu_encoder.lib basisu_wasm_api.obj basisu_wasm_transcoder_api.obj
+          test -f windows-x64/basisu.lib
       - uses: actions/upload-artifact@v4
         with:
           name: libbasisu-windows-x64
           path: windows-x64/basisu.lib
+          if-no-files-found: error
 
       - name: Install c3c
         shell: bash
@@ -150,3 +159,4 @@ jobs:
           path: |
             windows-x64/ktx.dll
             windows-x64/ktx.lib
+          if-no-files-found: error
