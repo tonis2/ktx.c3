@@ -146,11 +146,3 @@ native/build-basisu.sh    # -> <target>/libbasisu.a
 ```
 
 CI builds every platform this way via `.github/workflows/build-basisu.yml`.
-
-## Scope / not implemented
-
-- ASTC/ETC2 encoding (files with those formats can be read/inspected/extracted raw)
-- HDR basis formats (UASTC HDR 4x4 / ASTC HDR 6x6); only the LDR codecs are wired
-- KTX v1 files, BC6H encode (HDR pipeline), 16-bit PNG input
-
-Ported from KTX-Software and basis_universal (both Apache-2.0).
