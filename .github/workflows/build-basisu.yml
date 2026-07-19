@@ -39,6 +39,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # Puts cl/lib on PATH (vcvarsall); bash steps don't get the MSVC env otherwise.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - name: Build basisu.lib (MSVC)
         shell: bash
         run: |
@@ -53,7 +57,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release -DBASISU_EXAMPLES=OFF -DBASISU_OPENCL=OFF -DBASISU_STATIC=ON
           cmake --build native/build --target basisu_encoder --config Release
           # Compile the two C-API wrappers and merge into basisu.lib.
-          cl //nologo //O2 //std:c++17 //DBASISD_SUPPORT_KTX2_ZSTD=1 \
+          cl //nologo //O2 //MD //std:c++17 //DBASISD_SUPPORT_KTX2_ZSTD=1 \
             //I "$SRC" //I "$SRC/encoder" //I "$SRC/transcoder" //I "$SRC/zstd" \
             //c "$SRC/encoder/basisu_wasm_api.cpp" "$SRC/encoder/basisu_wasm_transcoder_api.cpp"
           mkdir -p windows-x64
