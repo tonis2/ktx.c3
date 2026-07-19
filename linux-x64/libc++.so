@@ -1,0 +1,5 @@
+/* GNU ld linker script, not a binary. project.json links the C++ runtime
+   basis_universal needs as "c++" (the macOS spelling); Linux ships libstdc++
+   instead, so redirect -lc++ to it here (this dir is on the linker search
+   path). Same trick glibc uses for its own libc.so. */
+INPUT(-lstdc++)

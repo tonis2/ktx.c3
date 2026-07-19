@@ -36,6 +36,13 @@ native/build/
 *.so
 *.so.*
 *.dylib
+# ...but DO track the per-platform libktx shared libs (native/build-shared.sh
+# / CI artifacts; loaded via FFI by e.g. the Blender addon) and the linux
+# libc++ linker-script shim that redirects -lc++ to libstdc++.
+!**/ktx.so
+!**/ktx.dylib
+!**/ktx.dll
+!**/libc++.so
 
 # Executables
 *.exe
