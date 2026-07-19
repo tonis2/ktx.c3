@@ -1,6 +1,6 @@
 // `ktx extract` — pull one image out of a KTX2 file as PNG or raw bytes.
 module ktx::cli;
-import ktx::container, ktx::vk, ktx::util, ktx::basis;
+import ktx::container, ktx::vk, ktx::util, ktx::basis, ktx::codec;
 import image;
 import image::png;
 import opt;
@@ -97,7 +97,7 @@ fn void? extract(String input, String output, uint level, uint layer, uint face,
 
 	uint w = tex.level_width(level);
 	uint h = tex.level_height(level);
-	char[] rgba = decode_image(tmem, tex.vk_format, img_bytes, w, h)!;
+	char[] rgba = codec::decode_image(tmem, tex.vk_format, img_bytes, w, h)!;
 	image::Image img = {
 		.width = w,
 		.height = h,

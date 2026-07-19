@@ -64,3 +64,4 @@ dkms.conf
 *.dwo
 build/
 out/
+headers/
