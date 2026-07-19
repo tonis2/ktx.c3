@@ -1,18 +1,29 @@
-# Builds the bundled basis_universal static library (libbasisu.a / basisu.lib)
-# for every platform the manifest supports, and uploads them as artifacts. A
-# maintainer commits the artifacts into the matching <target>/ directories (or
-# a release), so consumers of the ktx.c3l library link ETC1S/BasisLZ out of the
-# box without a C++ build.
+# Builds the native artifacts every platform needs, and uploads them so a
+# maintainer can commit them into the matching <target>/ directories (or a
+# release):
+#   - libbasisu.a / basisu.lib — bundled basis_universal static lib, linked by
+#     the ktx.c3l manifest so consumers get ETC1S/BasisLZ without a C++ build.
+#   - ktx.so / ktx.dylib / ktx.dll — the libktx shared library (C API in
+#     src/capi) for FFI consumers, e.g. the Blender glTF exporter addon.
 #
 # basis_universal is NOT a submodule of this repo (it's large and only needed
 # here); each runner fetches it at the pinned commit via native/build-basisu.sh.
-name: build-basisu
+# c3c is installed from its release archives. There is no linux-aarch64 or
+# x86_64 macOS c3c release binary: linux-aarch64 gets no shared lib for now,
+# and the macos-x64 dylib is cross-compiled from the arm64 runner.
+name: build-native
+
+env:
+  C3C_RELEASE: v0.8.2
 
 on:
   workflow_dispatch:
   push:
     paths:
       - native/build-basisu.sh
+      - native/build-shared.sh
+      - src/ktx/**
+      - src/capi/**
       - .github/workflows/build-basisu.yml
 
 jobs:
@@ -21,10 +32,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,         triple: macos-aarch64 }
-          - { os: macos-13,         triple: macos-x64 }
-          - { os: ubuntu-latest,    triple: linux-x64 }
-          - { os: ubuntu-24.04-arm, triple: linux-aarch64 }
+          - { os: macos-14,         triple: macos-aarch64, c3c: c3-macos.zip }
+          - { os: macos-13,         triple: macos-x64 }               # dylib cross-built in macos-x64-shared
+          - { os: ubuntu-latest,    triple: linux-x64,     c3c: c3-linux.tar.gz }
+          - { os: ubuntu-24.04-arm, triple: linux-aarch64 }           # no linux-aarch64 c3c release
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4          # no submodules: the script fetches basis
@@ -34,6 +45,51 @@ jobs:
         with:
           name: libbasisu-${{ matrix.triple }}
           path: ${{ matrix.triple }}/libbasisu.a
+
+      - name: Install c3c
+        if: matrix.c3c
+        run: |
+          curl -fsSL -o /tmp/c3c-dist "https://github.com/c3lang/c3c/releases/download/${C3C_RELEASE}/${{ matrix.c3c }}"
+          case "${{ matrix.c3c }}" in
+            *.zip) unzip -q /tmp/c3c-dist -d "$HOME" ;;   # both archives hold a top-level c3/
+            *)     tar -xzf /tmp/c3c-dist -C "$HOME" ;;
+          esac
+          echo "$HOME/c3" >> "$GITHUB_PATH"
+      - name: Build libktx shared library
+        if: matrix.c3c
+        run: ./native/build-shared.sh ${{ matrix.triple }}
+      - name: Smoke-test the C API
+        if: matrix.c3c
+        run: python3 test/capi_smoke.py ${{ matrix.triple }}/ktx.*
+      - uses: actions/upload-artifact@v4
+        if: matrix.c3c
+        with:
+          name: libktx-${{ matrix.triple }}
+          path: ${{ matrix.triple }}/ktx.*
+
+  # c3c publishes no x86_64 macOS binary (c3-macos.zip is arm64-only), so the
+  # x64 dylib is cross-compiled on the arm64 runner against the macos-x64
+  # libbasisu.a built above. No smoke test: the runner can't execute x64.
+  macos-x64-shared:
+    needs: unix
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: libbasisu-macos-x64
+          path: macos-x64
+      - name: Install c3c
+        run: |
+          curl -fsSL -o /tmp/c3-macos.zip "https://github.com/c3lang/c3c/releases/download/${C3C_RELEASE}/c3-macos.zip"
+          unzip -q /tmp/c3-macos.zip -d "$HOME"
+          echo "$HOME/c3" >> "$GITHUB_PATH"
+      - name: Cross-build ktx.dylib (x86_64)
+        run: ./native/build-shared.sh macos-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libktx-macos-x64
+          path: macos-x64/ktx.dylib
 
   windows:
     runs-on: windows-latest
@@ -67,3 +123,24 @@ jobs:
         with:
           name: libbasisu-windows-x64
           path: windows-x64/basisu.lib
+
+      - name: Install c3c
+        shell: bash
+        run: |
+          curl -fsSL -o c3-windows.zip "https://github.com/c3lang/c3c/releases/download/${C3C_RELEASE}/c3-windows.zip"
+          unzip -q c3-windows.zip -d "$HOME"
+          echo "$(cygpath -w "$HOME/c3")" >> "$GITHUB_PATH"
+      - name: Build ktx.dll
+        shell: bash
+        run: |
+          c3c dynamic-lib src/ktx/*.c3 src/capi/*.c3 -O2 --no-headers \
+            -L windows-x64 -l basisu -o windows-x64/ktx
+      - name: Smoke-test the C API
+        shell: bash
+        run: python test/capi_smoke.py windows-x64/ktx.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libktx-windows-x64
+          path: |
+            windows-x64/ktx.dll
+            windows-x64/ktx.lib

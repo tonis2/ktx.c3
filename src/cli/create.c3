@@ -1,6 +1,6 @@
 // `ktx create` — build a KTX2 texture from PNG/JPEG images.
 module ktx::cli;
-import ktx::container, ktx::vk, ktx::mipgen, ktx::basis;
+import ktx::container, ktx::vk, ktx::mipgen, ktx::basis, ktx::codec;
 import image;
 import opt;
 import std::io, std::io::file;
@@ -79,7 +79,7 @@ fn int cmd_create(String[] args)
 	// VkFormat per-level pipeline below.
 	uint bfmt;
 	bool bsrgb;
-	if (is_basis_format(format_name, &bfmt, &bsrgb))
+	if (codec::is_basis_format(format_name, &bfmt, &bsrgb))
 	{
 		basis::TexType type = cube
 			? basis::TexType.CUBE
@@ -93,7 +93,7 @@ fn int cmd_create(String[] args)
 		return 0;
 	}
 
-	uint? format = parse_format(format_name);
+	uint? format = codec::parse_format(format_name);
 	if (catch format)
 	{
 		io::eprintfn("error: unknown format '%s' (try 'ktx formats')", format_name);
@@ -166,7 +166,7 @@ fn void? create_texture(uint format, vk::FormatInfo fi, String[] inputs, String 
 				lw = max(lw >> 1, 1u);
 				lh = max(lh >> 1, 1u);
 			}
-			char[] encoded = encode_image(tmem, format, rgba, lw, lh)!;
+			char[] encoded = codec::encode_image(tmem, format, rgba, lw, lh)!;
 			tex.set_image(l, layer, face, encoded)!;
 		}
 	}
@@ -177,24 +177,6 @@ fn void? create_texture(uint format, vk::FormatInfo fi, String[] inputs, String 
 		cube ? 6 : (inputs.len > 1 ? inputs.len : 1),
 		cube ? "faces" : "layer(s)",
 		scheme == container::Scheme.NONE ? "uncompressed" : (scheme == container::Scheme.ZSTD ? "zstd" : "zlib"));
-}
-
-<*
- Recognize the basis_universal format aliases and decode them into the encoder
- format id (ETC1S / UASTC_4X4) plus an sRGB flag. Returns false for anything
- handled by the VkFormat pipeline. "-linear" selects linear colorspace; the
- bare name is sRGB (color).
-*>
-fn bool is_basis_format(String name, uint* fmt, bool* srgb) @local
-{
-	switch (name)
-	{
-		case "etc1s":         *fmt = basis::ETC1S;     *srgb = true;  return true;
-		case "etc1s-linear":  *fmt = basis::ETC1S;     *srgb = false; return true;
-		case "uastc":         *fmt = basis::UASTC_4X4; *srgb = true;  return true;
-		case "uastc-linear":  *fmt = basis::UASTC_4X4; *srgb = false; return true;
-		default:              return false;
-	}
 }
 
 <* Encode one or more images to an ETC1S/UASTC + BasisLZ KTX2 via basis_universal. *>

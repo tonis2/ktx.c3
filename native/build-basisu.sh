@@ -61,13 +61,17 @@ git -C "$SRC" fetch --depth 1 origin "$BASIS_COMMIT"
 git -C "$SRC" checkout -q "$BASIS_COMMIT"
 
 # Build the encoder static lib (bundles the transcoder + zstd; no examples/OpenCL).
+# PIC everywhere: the archive links into both executables (PIE) and the libktx
+# shared library (native/build-shared.sh); basis' CMake only sets PIC for its
+# python targets.
 cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
-  -DBASISU_EXAMPLES=OFF -DBASISU_OPENCL=OFF -DBASISU_STATIC=ON $CMAKE_OSX
+  -DBASISU_EXAMPLES=OFF -DBASISU_OPENCL=OFF -DBASISU_STATIC=ON \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON $CMAKE_OSX
 cmake --build "$BUILD" --target basisu_encoder -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
 # Compile the two C-API wrappers with the encoder's flags and archive everything
 # into one libbasisu.a.
-CXXFLAGS="-std=c++17 -O2 -fno-exceptions -fno-rtti -DBASISD_SUPPORT_KTX2_ZSTD=1 $MAC_MIN_FLAG"
+CXXFLAGS="-std=c++17 -O2 -fPIC -fno-exceptions -fno-rtti -DBASISD_SUPPORT_KTX2_ZSTD=1 $MAC_MIN_FLAG"
 INCLUDES="-I$SRC -I$SRC/encoder -I$SRC/transcoder -I$SRC/zstd"
 "${CXX:-c++}" $CXXFLAGS $INCLUDES -c "$SRC/encoder/basisu_wasm_api.cpp"            -o "$BUILD/bu_api.o"
 "${CXX:-c++}" $CXXFLAGS $INCLUDES -c "$SRC/encoder/basisu_wasm_transcoder_api.cpp" -o "$BUILD/bt_api.o"

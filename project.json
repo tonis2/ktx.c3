@@ -18,7 +18,7 @@
   // zstd, which also satisfies the container's ZSTD_* calls, so no separate
   // system libzstd is needed. "c++" links the C++ runtime basis_universal needs.
   "linked-libraries": [ "basisu", "c++" ],
-  "linker-search-paths": [ "macos-aarch64" ],
+  "linker-search-paths": [ "linux-x64", "macos-aarch64" ],
   "targets": {
     "ktx": {
       // Executable or library.
