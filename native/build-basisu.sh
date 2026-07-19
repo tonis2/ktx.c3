@@ -43,12 +43,19 @@ OUT="$REPO_ROOT/$triple"
 # lower than) whatever c3c links against. Otherwise the runner's SDK stamps the
 # .o files with the host's very recent minOS and every link prints a cosmetic
 # "object file was built for newer macOS version" warning.
+# Also pin the architecture from the triple: CI cross-compiles macos-x64 on
+# arm64 runners (Intel macOS runners are retired).
 MACOS_MIN=11.0
 CMAKE_OSX=""
 MAC_MIN_FLAG=""
 if [ "${triple%%-*}" = "macos" ]; then
-  CMAKE_OSX="-DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_MIN"
-  MAC_MIN_FLAG="-mmacosx-version-min=$MACOS_MIN"
+  case "${triple##*-}" in
+    x64)     mac_arch=x86_64 ;;
+    aarch64) mac_arch=arm64 ;;
+    *) echo "unknown macos arch in triple $triple" >&2; exit 1 ;;
+  esac
+  CMAKE_OSX="-DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_MIN -DCMAKE_OSX_ARCHITECTURES=$mac_arch"
+  MAC_MIN_FLAG="-mmacosx-version-min=$MACOS_MIN -arch $mac_arch"
   export MACOSX_DEPLOYMENT_TARGET="$MACOS_MIN"
 fi
 

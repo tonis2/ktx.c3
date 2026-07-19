@@ -33,7 +33,6 @@ jobs:
       matrix:
         include:
           - { os: macos-14,         triple: macos-aarch64, c3c: c3-macos.zip }
-          - { os: macos-13,         triple: macos-x64 }               # dylib cross-built in macos-x64-shared
           - { os: ubuntu-latest,    triple: linux-x64,     c3c: c3-linux.tar.gz }
           - { os: ubuntu-24.04-arm, triple: linux-aarch64 }           # no linux-aarch64 c3c release
     runs-on: ${{ matrix.os }}
@@ -67,18 +66,20 @@ jobs:
           name: libktx-${{ matrix.triple }}
           path: ${{ matrix.triple }}/ktx.*
 
-  # c3c publishes no x86_64 macOS binary (c3-macos.zip is arm64-only), so the
-  # x64 dylib is cross-compiled on the arm64 runner against the macos-x64
-  # libbasisu.a built above. No smoke test: the runner can't execute x64.
-  macos-x64-shared:
-    needs: unix
+  # Intel macOS runners (macos-13) are retired and c3c ships no x86_64 mac
+  # binary, so the whole macos-x64 target is cross-compiled from arm64:
+  # build-basisu.sh pins CMAKE_OSX_ARCHITECTURES/-arch and build-shared.sh
+  # passes --target. No smoke test: the runner can't execute x64 natively.
+  macos-x64:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Build libbasisu.a (x86_64 cross)
+        run: ./native/build-basisu.sh macos-x64
+      - uses: actions/upload-artifact@v4
         with:
           name: libbasisu-macos-x64
-          path: macos-x64
+          path: macos-x64/libbasisu.a
       - name: Install c3c
         run: |
           curl -fsSL -o /tmp/c3-macos.zip "https://github.com/c3lang/c3c/releases/download/${C3C_RELEASE}/c3-macos.zip"
@@ -133,10 +134,10 @@ jobs:
       - name: Build ktx.dll
         shell: bash
         run: |
-          # c3c's -L/-l don't reach lld-link as /libpath:; hand the .lib
-          # straight to the linker instead.
+          # c3c's -L/-l don't reach lld-link as /libpath:, and lld-link runs
+          # from a different cwd — hand it an absolute Windows-style path.
           c3c dynamic-lib src/ktx/*.c3 src/capi/*.c3 -O2 --no-headers \
-            -z windows-x64/basisu.lib -o windows-x64/ktx
+            -z "$(cygpath -w "$PWD/windows-x64/basisu.lib")" -o windows-x64/ktx
       - name: Smoke-test the C API
         shell: bash
         run: python test/capi_smoke.py windows-x64/ktx.dll
