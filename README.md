@@ -189,7 +189,12 @@ named per target:
 ktx-macos-aarch64.dylib   ktx-macos-x64.dylib
 ktx-linux-x64.so          ktx-windows-x64.dll   ktx-windows-x64.lib
 libzstd-<triple>.a        zstd-windows-x64.lib
+ktx-cli-<triple>          ktx-cli-windows-x64.exe
 ```
 
 so a consumer can fetch exactly one file, e.g.
 `https://github.com/tonis2/ktx.c3/releases/latest/download/ktx-macos-aarch64.dylib`.
+
+The `ktx-cli-*` assets are the standalone CLI — download one, `chmod +x` it
+(macOS/Linux) and run `ktx-cli-<triple> create/extract/info` directly, no
+build needed.

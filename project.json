@@ -31,6 +31,19 @@
     "ktx-linux": {
       "type": "executable",
       "linker-search-paths": [ "lib/linux-x64", "lib/linux-aarch64" ]
+    },
+    // CI cross-build of the x86_64 mac CLI from the arm64 runner
+    // (c3c build ktx-macos-x64 --target macos-x64), and the Windows CLI.
+    // lld-link takes the .lib as a direct input via link-args ("-l zstd"
+    // doesn't reach it as /libpath, same quirk as in build-shared.sh).
+    "ktx-macos-x64": {
+      "type": "executable",
+      "linker-search-paths": [ "lib/macos-x64" ]
+    },
+    "ktx-windows": {
+      "type": "executable",
+      "linked-libraries": [],
+      "link-args": [ "lib/windows-x64/zstd.lib" ]
     }
   },
   // Global settings.
