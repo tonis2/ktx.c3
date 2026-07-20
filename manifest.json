@@ -9,9 +9,13 @@
   // No C3 library dependencies: ktx::* uses only the standard library.
   "dependencies": [],
   // The one native dependency: zstd (bound in src/ktx/zstd.c3), bundled as a
-  // prebuilt static lib per target at <target>/libzstd.a (native/build-zstd.sh).
+  // prebuilt static lib per target at lib/<target>/libzstd.a
+  // (native/build-zstd.sh).
   // Plain C, no runtime baggage — the ETC1S/UASTC codec itself is pure C3
   // (src/ktx/{uastc,etc1s,basis}.c3), so no C++ runtime is linked.
+  // linklib-dir makes c3c look for the per-target native libs under
+  // lib/<target>/ instead of the default <target>/ at the library root.
+  "linklib-dir": "lib",
   "targets": {
     "macos-aarch64": {
       "linked-libraries": [ "zstd" ]

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build zstd into a static library (libzstd.a) and drop it in the per-target
 # directory this repo's manifest.json / project.json link from
-# (e.g. macos-aarch64/libzstd.a). This replaced build-basisu.sh at the
+# (e.g. lib/macos-aarch64/libzstd.a). This replaced build-basisu.sh at the
 # basis-rewrite phase-6 cutover (docs/basis-rewrite.md): the ETC1S/UASTC codec
 # is pure C3 now, so zstd — plain C, no runtime deps — is the only native
 # dependency left (src/ktx/zstd.c3 binds ZSTD_compress/decompress/
@@ -36,7 +36,7 @@ if [ -z "$triple" ]; then
   esac
   triple="${os}-${arch}"
 fi
-OUT="$REPO_ROOT/$triple"
+OUT="$REPO_ROOT/lib/$triple"
 
 # On macOS, pin a low deployment target (see build-shared.sh) and the arch from
 # the triple — CI cross-compiles macos-x64 on arm64 runners.
