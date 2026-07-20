@@ -8,6 +8,7 @@
 # namespace (two platforms both produce a "ktx.so"/"ktx.dylib"):
 #   ktx-<triple>.{so,dylib,dll}  ktx-windows-x64.lib (import lib)
 #   libzstd-<triple>.a           zstd-windows-x64.lib
+#   ktx-cli-<triple>[.exe]       standalone CLI binaries
 name: release
 
 on:
@@ -33,11 +34,15 @@ jobs:
           set -euo pipefail
           mkdir -p release
           for dir in artifacts/*/; do
-            name=$(basename "$dir")               # libzstd-<triple> | libktx-<triple>
-            triple=${name#libzstd-}; triple=${triple#libktx-}
+            name=$(basename "$dir")               # libzstd-<triple> | libktx-<triple> | ktxcli-<triple>
+            triple=${name#libzstd-}; triple=${triple#libktx-}; triple=${triple#ktxcli-}
             for f in "$dir"*; do
-              base=$(basename "$f")               # e.g. ktx.dylib, libzstd.a
-              cp "$f" "release/${base%.*}-${triple}.${base##*.}"
+              base=$(basename "$f")               # e.g. ktx.dylib, libzstd.a, ktx-cli-<triple>
+              if [[ "$base" == *"$triple"* ]]; then
+                cp "$f" "release/$base"           # already carries the triple (CLI binaries)
+              else
+                cp "$f" "release/${base%.*}-${triple}.${base##*.}"
+              fi
             done
           done
           ls -l release/

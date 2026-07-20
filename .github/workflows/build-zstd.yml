@@ -6,6 +6,8 @@
 #     ktx.c3l manifest.
 #   - ktx.so / ktx.dylib / ktx.dll — the libktx shared library (C API in
 #     src/capi) for FFI consumers, e.g. the Blender glTF exporter addon.
+#   - ktx-cli-<triple>[.exe] — the standalone ktx CLI (create/extract/info),
+#     ready to download and run.
 #
 # zstd is NOT vendored; each runner fetches the pinned release tarball via
 # native/build-zstd.sh. c3c is installed from its release archives. There is
@@ -34,12 +36,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,         triple: macos-aarch64, c3c: c3-macos.zip }
-          - { os: ubuntu-latest,    triple: linux-x64,     c3c: c3-linux.tar.gz }
+          - { os: macos-14,         triple: macos-aarch64, c3c: c3-macos.zip,     cli: ktx }
+          - { os: ubuntu-latest,    triple: linux-x64,     c3c: c3-linux.tar.gz, cli: ktx-linux }
           - { os: ubuntu-24.04-arm, triple: linux-aarch64 }           # no linux-aarch64 c3c release
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4          # no submodules: the script fetches zstd
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive            # getopt.c3l + image.c3l for the CLI build
       - name: Build libzstd.a
         run: ./native/build-zstd.sh ${{ matrix.triple }}
       - uses: actions/upload-artifact@v4
@@ -70,6 +74,23 @@ jobs:
           path: ${{ matrix.triple }}/ktx.*
           if-no-files-found: error
 
+      - name: Build the ktx CLI
+        if: matrix.cli
+        run: |
+          c3c build ${{ matrix.cli }} -O2
+          mv "build/${{ matrix.cli }}" "build/ktx-cli-${{ matrix.triple }}"
+      - name: Smoke-test the CLI
+        if: matrix.cli
+        run: |
+          ./build/ktx-cli-${{ matrix.triple }} create -f etc1s -o /tmp/cli-smoke.ktx2 test/images/detail.png
+          ./build/ktx-cli-${{ matrix.triple }} info /tmp/cli-smoke.ktx2
+      - uses: actions/upload-artifact@v4
+        if: matrix.cli
+        with:
+          name: ktxcli-${{ matrix.triple }}
+          path: build/ktx-cli-${{ matrix.triple }}
+          if-no-files-found: error
+
   # Intel macOS runners (macos-13) are retired and c3c ships no x86_64 mac
   # binary, so the whole macos-x64 target is cross-compiled from arm64:
   # build-zstd.sh pins -arch and build-shared.sh passes --target. No smoke
@@ -78,6 +99,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Build libzstd.a (x86_64 cross)
         run: ./native/build-zstd.sh macos-x64
       - uses: actions/upload-artifact@v4
@@ -97,11 +120,22 @@ jobs:
           name: libktx-macos-x64
           path: macos-x64/ktx.dylib
           if-no-files-found: error
+      - name: Cross-build the ktx CLI (x86_64)
+        run: |
+          c3c build ktx-macos-x64 --target macos-x64 -O2
+          mv build/ktx-macos-x64 build/ktx-cli-macos-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ktxcli-macos-x64
+          path: build/ktx-cli-macos-x64
+          if-no-files-found: error
 
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       # Puts cl/lib on PATH (vcvarsall); bash steps don't get the MSVC env otherwise.
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -158,4 +192,20 @@ jobs:
           path: |
             windows-x64/ktx.dll
             windows-x64/ktx.lib
+          if-no-files-found: error
+
+      - name: Build the ktx CLI
+        shell: bash
+        run: |
+          c3c build ktx-windows -O2
+          mv build/ktx-windows.exe build/ktx-cli-windows-x64.exe
+      - name: Smoke-test the CLI
+        shell: bash
+        run: |
+          ./build/ktx-cli-windows-x64.exe create -f etc1s -o cli-smoke.ktx2 test/images/detail.png
+          ./build/ktx-cli-windows-x64.exe info cli-smoke.ktx2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ktxcli-windows-x64
+          path: build/ktx-cli-windows-x64.exe
           if-no-files-found: error
