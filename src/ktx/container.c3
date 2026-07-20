@@ -320,8 +320,10 @@ fn void? parse_kvd(Texture* tex, char[] kvd) @local
 
 struct WriteOptions
 {
-	Scheme scheme;         // NONE, ZSTD or ZLIB
+	Scheme scheme;         // NONE, ZSTD, ZLIB, or BASIS_LZ (requires `sgd`)
 	int zstd_level;        // 1..22; 0 → default (3, same as libktx)
+	char[] sgd;            // supercompressionGlobalData for BASIS_LZ; levels
+	                       // are then written as-is (already entropy coded)
 }
 
 fn void? write_file(Texture* tex, String path, WriteOptions opts = {}) => @pool()
@@ -333,7 +335,8 @@ fn void? write_file(Texture* tex, String path, WriteOptions opts = {}) => @pool(
 <* Serialize the texture to KTX2 file bytes. *>
 fn char[]? write(Allocator allocator, Texture* tex, WriteOptions opts = {}) => @pool()
 {
-	if (opts.scheme == Scheme.BASIS_LZ) return UNSUPPORTED_SCHEME~;
+	if (opts.scheme == Scheme.BASIS_LZ && !opts.sgd.len) return UNSUPPORTED_SCHEME~;
+	if (opts.scheme != Scheme.BASIS_LZ && opts.sgd.len) return INVALID_ARGUMENT~;
 	if (tex.levels.len == 0 || tex.width == 0) return INVALID_ARGUMENT~;
 	if (tex.face_count != 1 && tex.face_count != 6) return INVALID_ARGUMENT~;
 	if (tex.generate_mipmaps && tex.levels.len != 1) return INVALID_ARGUMENT~;
@@ -391,6 +394,7 @@ fn char[]? write(Allocator allocator, Texture* tex, WriteOptions opts = {}) => @
 	}
 
 	// Supercompress level payloads (levels stay independent streams).
+	// BasisLZ payloads arrive already entropy-coded.
 	char[][] payloads = alloc::new_array(tmem, char[], levels);
 	foreach (l, level : tex.levels)
 	{
@@ -399,18 +403,25 @@ fn char[]? write(Allocator allocator, Texture* tex, WriteOptions opts = {}) => @
 			case NONE: payloads[l] = level;
 			case ZSTD: payloads[l] = zstd::compress(tmem, level, opts.zstd_level ?: 3)!;
 			case ZLIB: payloads[l] = zlib::compress(tmem, level)!;
-			default: unreachable();
+			case BASIS_LZ: payloads[l] = level;
 		}
 	}
 
 	// Layout. Level data goes smallest level first, each level aligned to
 	// lcm(blockSize, 4) when not supercompressed (mipPadding), unaligned
-	// otherwise.
+	// otherwise. BasisLZ global data sits between KVD and levels, 8-aligned.
 	sz req_align = opts.scheme == Scheme.NONE ? util::lcm4(block_bytes) : 1;
 	sz index_size = (sz)levels * LEVEL_ENTRY_SIZE;
 	sz dfd_offset = HEADER_SIZE + index_size;
 	sz kvd_offset = dfd_offset + dfd_bytes.len;
 	sz cursor = kvd_offset + kvd_len;
+	sz sgd_offset;
+	if (opts.sgd.len)
+	{
+		cursor += util::pad_len(8, cursor);
+		sgd_offset = cursor;
+		cursor += opts.sgd.len;
+	}
 	cursor += util::pad_len(req_align, cursor);
 	ulong[MAX_LEVELS] level_offsets;
 	for (uint l = levels; l > 0; --l)
@@ -436,18 +447,20 @@ fn char[]? write(Allocator allocator, Texture* tex, WriteOptions opts = {}) => @
 	util::wr32(out, 52, (uint)dfd_bytes.len);
 	util::wr32(out, 56, kvd_len ? (uint)kvd_offset : 0);
 	util::wr32(out, 60, (uint)kvd_len);
-	util::wr64(out, 64, 0);   // sgdByteOffset
-	util::wr64(out, 72, 0);   // sgdByteLength
+	util::wr64(out, 64, (ulong)sgd_offset);   // 0 unless BasisLZ
+	util::wr64(out, 72, (ulong)opts.sgd.len);
 
 	for (uint l = 0; l < levels; ++l)
 	{
 		sz at = HEADER_SIZE + l * LEVEL_ENTRY_SIZE;
 		util::wr64(out, at, level_offsets[l]);
 		util::wr64(out, at + 8, payloads[l].len);
-		util::wr64(out, at + 16, tex.levels[l].len);
+		// The spec requires uncompressedByteLength 0 for BasisLZ.
+		util::wr64(out, at + 16, opts.scheme == Scheme.BASIS_LZ ? 0 : tex.levels[l].len);
 	}
 
 	out[dfd_offset:dfd_bytes.len] = dfd_bytes[..];
+	if (opts.sgd.len) out[sgd_offset:opts.sgd.len] = opts.sgd[..];
 
 	sz p = kvd_offset;
 	foreach (pair : kv)

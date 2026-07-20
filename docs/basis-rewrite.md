@@ -156,24 +156,36 @@ involvement.
 
 Working first, competitive later. Ship correctness, then iterate quality.
 
-- [ ] ETC1S single-block encoder: best base color + intensity index +
+- [x] ETC1S single-block encoder: best base color + intensity index +
       selectors for a 4x4 block (exhaustive over intensity tables, fast
-      color fit).
-- [ ] Frontend v1: k-means endpoint clustering + selector clustering to
+      color fit). (Generalized to arbitrary pixel sets for cluster refits.)
+- [x] Frontend v1: k-means endpoint clustering + selector clustering to
       fixed-size codebooks (quality 0–100 → codebook size mapping copied
-      from basisu's curve).
-- [ ] Backend: serialize codebooks + Huffman tables + delta/RLE index
+      from basisu's curve). (Deterministic quantile seeding + Lloyd
+      iterations, per-cluster refits, exact per-block selector reassignment,
+      unused-entry pruning, delta-friendly codebook ordering.)
+- [x] Backend: serialize codebooks + Huffman tables + delta/RLE index
       streams into spec-conformant global data + slices (mirror of phase 2 —
-      reuse its tables/structs).
-- [ ] Alpha slice support.
-- [ ] Interop gate: `ktx validate` clean; official basisu decodes our files;
-      our phase-2 decoder round-trips.
-- [ ] Quality tracking table on the corpus: size + PSNR, ours vs basisu at
+      reuse its tables/structs). (Endpoint deltas with the 3 context models,
+      selector palette raw or XOR-delta-coded — whichever is smaller —
+      left/upper/upper-left predictors, pred-symbol repeat runs, selector
+      history buffer with RLE; encode→decode round-trip unit-tested incl.
+      1x1..5x5 slices.)
+- [x] Alpha slice support. (Alpha encoded as ETC1S gray in a second slice
+      per image, shared codebooks, per the format.)
+- [x] Interop gate: `ktx validate` clean (v4.4.0 incl. mips/cube); official
+      basisu decodes our files bit-identically to our decoder (asserted per
+      level in test/basis_enc_test.c3); our phase-2 decoder round-trips.
+- [x] Quality tracking table on the corpus: size + PSNR, ours vs basisu at
       q10/50/90. First pass will lose — the table makes the gap visible and
-      every tuning commit measurable.
+      every tuning commit measurable. → q10: PSNR −1.7..+1.9 dB, size −4..+10%;
+      q90: PSNR −0.7..+0.7 dB, size +6..+32% (worst on the tiny gradient
+      image where we are also +0.7 dB ahead). capi etc1s mad improved from
+      2.43 (basisu) to 2.17.
 - [ ] Iterate frontend (cluster refinement passes, better seeding) until
       size-at-quality is within ~15% of basisu, or consciously accept the
-      gap.
+      gap. (q10/q50 are within; q90 runs +6..32% — cluster-merge iteration
+      still to do.)
 
 Exit criteria: interop gates pass; quality gap known and documented.
 

@@ -111,7 +111,7 @@ struct EncodeOptions
 fn char[]? encode(Allocator allocator, uint fmt, char[][] images, uint w, uint h, TexType type, EncodeOptions opts)
 {
 	if (fmt == UASTC_4X4) return encode_uastc_c3(allocator, images, w, h, type, opts);
-	return encode_ffi(allocator, fmt, images, w, h, type, opts);
+	return encode_etc1s_c3(allocator, images, w, h, type, opts);
 }
 
 <* The original basisu FFI encode path (both formats). *>
@@ -226,6 +226,190 @@ fn char[]? encode_uastc_c3(Allocator allocator, char[][] images, uint w, uint h,
 	}
 
 	return container::write(allocator, &tex, { .scheme = container::Scheme.ZSTD });
+}
+
+<*
+ Pure-C3 ETC1S/BasisLZ KTX2 encode: mips via ktx::mipgen, global codebooks +
+ slice streams via ktx::etc1s, BasisLZ supercompression global data assembled
+ here, container written by ktx::container. Matches basisu's output shape:
+ vkFormat 0, typeSize 1, ETC1S DFD (model 163), RGB slice (+ alpha slice when
+ any input has alpha) per image, sliced per mip level.
+*>
+fn char[]? encode_etc1s_c3(Allocator allocator, char[][] images, uint w, uint h, TexType type, EncodeOptions opts) @local => @pool()
+{
+	if (!images.len) return ENCODE_FAILED~;
+	if (type == TexType.CUBE && (images.len != 6 || w != h)) return ENCODE_FAILED~;
+	foreach (img : images)
+	{
+		if (img.len != (usz)w * h * 4) return ENCODE_FAILED~;
+	}
+
+	bool has_alpha;
+	foreach (img : images)
+	{
+		for (usz i = 3; i < img.len; i += 4)
+		{
+			if (img[i] != 255)
+			{
+				has_alpha = true;
+				break;
+			}
+		}
+		if (has_alpha) break;
+	}
+
+	uint levels = opts.mipmaps ? mipgen::chain_length(w, h) : 1;
+	uint image_count = (uint)images.len;
+	uint num_images = levels * image_count;
+	uint slices_per_image = has_alpha ? 2 : 1;
+
+	// Mip chains per input image, then slices in imageDesc order
+	// (level-major, image within level, RGB before alpha).
+	char[][] mips = alloc::new_array(tmem, char[], (sz)((usz)levels * image_count));
+	foreach (idx, img : images)
+	{
+		char[] mip = img;
+		uint lw = w;
+		uint lh = h;
+		for (uint l = 0; l < levels; ++l)
+		{
+			if (l > 0)
+			{
+				mip = mipgen::next_level(tmem, mip, lw, lh, { .srgb = opts.srgb });
+				lw = max(lw >> 1, 1u);
+				lh = max(lh >> 1, 1u);
+			}
+			mips[(usz)l * image_count + (usz)idx] = mip;
+		}
+	}
+
+	etc1s::EncSlice[] slices = alloc::new_array(tmem, etc1s::EncSlice, (sz)((usz)num_images * slices_per_image));
+	for (uint l = 0; l < levels; ++l)
+	{
+		uint lw = max(w >> l, 1u);
+		uint lh = max(h >> l, 1u);
+		for (uint i = 0; i < image_count; ++i)
+		{
+			char[] mip = mips[(usz)l * image_count + i];
+			usz si = ((usz)l * image_count + i) * slices_per_image;
+			slices[si] = { .rgba = mip, .width = lw, .height = lh, .alpha = false };
+			if (has_alpha)
+			{
+				slices[si + 1] = { .rgba = mip, .width = lw, .height = lh, .alpha = true };
+			}
+		}
+	}
+
+	etc1s::Encoded enc = etc1s::encode(tmem, slices, (uint)opts.quality) ?? ENCODE_FAILED~!;
+
+	// Level payloads: concatenated slice streams, offsets recorded per image.
+	char[][] level_payloads = alloc::new_array(tmem, char[], (sz)levels);
+	uint[] rgb_offs = alloc::new_array(tmem, uint, (sz)num_images);
+	uint[] alpha_offs = alloc::new_array(tmem, uint, (sz)num_images);
+	for (uint l = 0; l < levels; ++l)
+	{
+		usz total;
+		for (uint i = 0; i < image_count; ++i)
+		{
+			usz si = ((usz)l * image_count + i) * slices_per_image;
+			rgb_offs[(usz)l * image_count + i] = (uint)total;
+			total += enc.slices[si].len;
+			if (has_alpha)
+			{
+				alpha_offs[(usz)l * image_count + i] = (uint)total;
+				total += enc.slices[si + 1].len;
+			}
+		}
+		char[] payload = alloc::new_array(tmem, char, (sz)total);
+		usz at;
+		for (uint i = 0; i < image_count; ++i)
+		{
+			usz si = ((usz)l * image_count + i) * slices_per_image;
+			payload[at : enc.slices[si].len] = enc.slices[si][..];
+			at += enc.slices[si].len;
+			if (has_alpha)
+			{
+				payload[at : enc.slices[si + 1].len] = enc.slices[si + 1][..];
+				at += enc.slices[si + 1].len;
+			}
+		}
+		level_payloads[l] = payload;
+	}
+
+	// supercompressionGlobalData.
+	usz sgd_len = 20 + (usz)num_images * 20
+		+ enc.endpoints_data.len + enc.selectors_data.len + enc.tables_data.len;
+	char[] sgd = alloc::new_array(tmem, char, (sz)sgd_len);
+	sgd[0] = (char)(enc.num_endpoints & 0xFF);
+	sgd[1] = (char)(enc.num_endpoints >> 8);
+	sgd[2] = (char)(enc.num_selectors & 0xFF);
+	sgd[3] = (char)(enc.num_selectors >> 8);
+	util::wr32(sgd, 4, (uint)enc.endpoints_data.len);
+	util::wr32(sgd, 8, (uint)enc.selectors_data.len);
+	util::wr32(sgd, 12, (uint)enc.tables_data.len);
+	util::wr32(sgd, 16, 0);   // extendedByteLength
+	for (uint img = 0; img < num_images; ++img)
+	{
+		uint l = img / image_count;
+		uint i = img % image_count;
+		usz si = ((usz)l * image_count + i) * slices_per_image;
+		sz at = 20 + (sz)img * 20;
+		util::wr32(sgd, at, 0);   // imageFlags
+		util::wr32(sgd, at + 4, rgb_offs[img]);
+		util::wr32(sgd, at + 8, (uint)enc.slices[si].len);
+		util::wr32(sgd, at + 12, has_alpha ? alpha_offs[img] : 0);
+		util::wr32(sgd, at + 16, has_alpha ? (uint)enc.slices[si + 1].len : 0);
+	}
+	usz sec = 20 + (usz)num_images * 20;
+	sgd[sec : enc.endpoints_data.len] = enc.endpoints_data[..];
+	sec += enc.endpoints_data.len;
+	sgd[sec : enc.selectors_data.len] = enc.selectors_data[..];
+	sec += enc.selectors_data.len;
+	sgd[sec : enc.tables_data.len] = enc.tables_data[..];
+
+	container::Texture tex = {
+		.vk_format = 0,
+		.type_size = 1,
+		.width = w,
+		.height = h,
+		.layer_count = type == TexType.ARRAY ? image_count : 0,
+		.face_count = type == TexType.CUBE ? 6 : 1,
+		.dfd = etc1s_dfd(tmem, opts.srgb, has_alpha),
+		.allocator = tmem,
+		.levels = level_payloads,
+	};
+	return container::write(allocator, &tex, { .scheme = container::Scheme.BASIS_LZ, .sgd = sgd });
+}
+
+<*
+ Canonical DFD bytes for an ETC1S KTX2, byte-identical to basisu's: model 163,
+ 4x4 blocks, bytesPlane0 8, one 64-bit RGB sample — plus a second 64-bit
+ alpha-channel sample (and bytesPlane1 8) when the file carries alpha slices.
+*>
+fn char[] etc1s_dfd(Allocator allocator, bool srgb, bool alpha) @local
+{
+	uint samples = alpha ? 2 : 1;
+	uint size = 24 + samples * 16 + 4;
+	char[] d = alloc::new_array(allocator, char, (sz)size);
+	util::wr32(d, 0, size);
+	util::wr32(d, 8, 2 | ((24 + samples * 16) << 16));
+	d[12] = (char)dfd::MODEL_ETC1S;
+	d[13] = (char)dfd::PRIMARIES_BT709;
+	d[14] = (char)(srgb ? dfd::TRANSFER_SRGB : dfd::TRANSFER_LINEAR);
+	d[16] = 3;   // 4x4 blocks
+	d[17] = 3;
+	d[20] = 8;   // bytesPlane0
+	if (alpha) d[21] = 8;
+	d[30] = 63;                              // sample 0: 64-bit RGB
+	util::wr32(d, 40, 0xFFFF_FFFF);
+	if (alpha)
+	{
+		d[44] = 64;                          // sample 1: 64-bit alpha at bit 64
+		d[46] = 63;
+		d[47] = (char)dfd::CHANNEL_ALPHA;
+		util::wr32(d, 56, 0xFFFF_FFFF);
+	}
+	return d;
 }
 
 <*
