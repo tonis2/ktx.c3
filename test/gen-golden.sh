@@ -6,16 +6,25 @@
 # phases diff the C3 decoders bit-exactly against these dumps.
 #
 # The dumps are taken with `extract --ffi` and files are encoded with
-# `create --ffi` so the oracle is ALWAYS basisu, even after `basis::transcode`
-# and `basis::encode` start routing through the C3 codec.
+# `create --ffi` so the oracle is ALWAYS basisu.
+#
+# FROZEN since the phase-6 cutover: the bundled basisu (and the --ffi flags)
+# are gone from current builds, so this script must be run with a `ktx` binary
+# built from the last pre-cutover revision (the commit before basis.c3 lost
+# its FFI externs — see docs/basis-rewrite.md). The golden files it produced
+# remain valid oracles for today's code; pass that binary via KTX=path.
 #
 # Output lands in test/golden/ (gitignored) — a local artifact, regenerated
 # any time with this script while basisu is still linked.
 set -e
 cd "$(dirname "$0")/.."
 
-KTX=build/ktx
+KTX=${KTX:-build/ktx}
 [ -x "$KTX" ] || c3c build
+if ! "$KTX" create --help | grep -q -- --ffi; then
+	echo "error: $KTX has no --ffi flag (post-cutover build); use a pre-cutover binary via KTX=path" >&2
+	exit 1
+fi
 
 rm -rf test/golden
 mkdir -p test/golden

@@ -1,4 +1,4 @@
-# On every v* tag: rebuild all native libs (via build-basisu.yml) and attach
+# On every v* tag: rebuild all native libs (via build-zstd.yml) and attach
 # them to the tag's GitHub release as raw files — no archives — so consumers
 # can fetch a single lib directly, e.g. the Blender glTF addon downloading
 # only the library matching the user's OS:
@@ -7,7 +7,7 @@
 # Asset names embed the target triple because release assets share one flat
 # namespace (two platforms both produce a "ktx.so"/"ktx.dylib"):
 #   ktx-<triple>.{so,dylib,dll}  ktx-windows-x64.lib (import lib)
-#   libbasisu-<triple>.a         basisu-windows-x64.lib
+#   libzstd-<triple>.a           zstd-windows-x64.lib
 name: release
 
 on:
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   build:
-    uses: ./.github/workflows/build-basisu.yml
+    uses: ./.github/workflows/build-zstd.yml
 
   publish:
     needs: build
@@ -33,10 +33,10 @@ jobs:
           set -euo pipefail
           mkdir -p release
           for dir in artifacts/*/; do
-            name=$(basename "$dir")               # libbasisu-<triple> | libktx-<triple>
-            triple=${name#libbasisu-}; triple=${triple#libktx-}
+            name=$(basename "$dir")               # libzstd-<triple> | libktx-<triple>
+            triple=${name#libzstd-}; triple=${triple#libktx-}
             for f in "$dir"*; do
-              base=$(basename "$f")               # e.g. ktx.dylib, libbasisu.a
+              base=$(basename "$f")               # e.g. ktx.dylib, libzstd.a
               cp "$f" "release/${base%.*}-${triple}.${base##*.}"
             done
           done

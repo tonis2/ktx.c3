@@ -11,9 +11,9 @@ Vulkan-based engines and asset pipelines.
   Output validates clean against the official `ktx validate`.
 - **Supercompression:** Zstandard and ZLIB (pure C3, stdlib deflate) for
   GPU-ready BCn. **ETC1S + BasisLZ** and **UASTC 4x4 + Zstd** encode (2D, mip
-  chains, array layers, cubemaps) plus transcoding to BC7/BC1/ETC2/ASTC are
-  provided by bundled `basis_universal` (see below) for small downloads and
-  mobile-GPU portability.
+  chains, array layers, cubemaps) plus transcoding to RGBA32/BC1/BC3/BC7 —
+  implemented in pure C3 (see below) for small downloads and mobile-GPU
+  portability.
 - **GPU block compression, encoders + decoders in pure C3:**
   - **BC1, BC3, BC4, BC5** — decoders bit-identical to the basis_universal
     reference; encoders use bbox + least-squares refinement (stb_dxt approach).
@@ -27,7 +27,7 @@ Vulkan-based engines and asset pipelines.
 
 ```sh
 git submodule update --init --recursive   # fetch getopt.c3l + image.c3l
-c3c build                                 # links bundled libbasisu.a (no system libzstd needed)
+c3c build                                 # links bundled libzstd.a (no system libzstd needed)
 
 # color texture: BC7 + full mip chain + Zstd (default) supercompression
 build/ktx create --format bc7-srgb --mipmap -o albedo.ktx2 albedo.png
@@ -70,9 +70,9 @@ can add it as a normal C3 library dependency: drop it in a directory named
 "dependencies": [ "ktx" ]
 ```
 
-The manifest links the bundled `libbasisu` (which supplies zstd and the
-ETC1S/UASTC codec) plus a C++ runtime for you, so a consumer builds out of the
-box with no system `libzstd`. Then:
+The manifest links the bundled `libzstd` for you — the ETC1S/UASTC codec is
+pure C3 — so a consumer builds out of the box with no system `libzstd` and no
+C++ runtime. Then:
 
 ```c3
 import ktx::container, ktx::vk, ktx::bc7, ktx::mipgen;
@@ -88,9 +88,9 @@ On the engine side, `container::read` hands back inflated, GPU-ready level
 payloads (`tex.image(level, layer, face)`) to feed straight into
 `vkCmdCopyBufferToImage`, `vk_format` matching `VkFormat` numerically.
 
-No system `libzstd` is needed: the bundled `basis_universal` static lib
-(`<target>/libbasisu.a`) provides both zstd and the ETC1S/BasisLZ codec, and the
-manifest links it plus a C++ runtime per platform.
+No system `libzstd` is needed: a prebuilt `libzstd.a` is bundled per platform
+(`<target>/libzstd.a`, built by `native/build-zstd.sh`) and the manifest links
+it — the only native code in the library.
 
 ## Tests
 
@@ -101,55 +101,45 @@ sh test/gen-golden.sh       # regenerate the basis decode oracles in test/golden
 ```
 
 `test/images/` holds a small committed corpus (smooth gradient, high-detail,
-alpha, normal map — 64x64 each). `test/gen-golden.sh` encodes it across an
-ETC1S/UASTC × quality × mips matrix with the basisu encoder (`create --ffi`)
-and records every level's RGBA32 transcode via the basisu transcoder
-(`extract --ffi`), plus the raw source pixels; the pure-C3 basis codec
+alpha, normal map — 64x64 each). `test/gen-golden.sh` encoded it across an
+ETC1S/UASTC × quality × mips matrix with basis_universal and recorded every
+level's RGBA32 transcode plus the raw source pixels; the pure-C3 basis codec
 (see `docs/basis-rewrite.md`) is diffed bit-exactly against those dumps, and
-the C3 UASTC encoder's PSNR/size is gated against the recorded basisu files.
-`cross-validate.sh` picks up the official tool from `$PATH` or a prebuilt
-KTX-Software release unpacked into `native/ktxtools/`.
+the C3 encoders' PSNR/size is gated against the recorded basisu files. The
+script is frozen: it needs a `ktx` binary from the last pre-cutover revision
+(basisu is no longer linked), but the golden files it produced remain valid
+oracles for today's code. `cross-validate.sh` picks up the official tool from
+`$PATH` or a prebuilt KTX-Software release unpacked into `native/ktxtools/`.
 
 Cross-checks performed during development: all written files pass official
 `ktx validate` with zero warnings; files created by the official `ktx create`
 read back pixel-exact; BCn/BC7 decoders verified bit-identical against
 basis_universal's unpackers.
 
-## ETC1S / UASTC + BasisLZ (via basis_universal)
+## ETC1S / UASTC + BasisLZ
 
-> A pure-C3 replacement for basis_universal is nearly complete — see
-> `docs/basis-rewrite.md` for the plan and status. Landed (phases 0–5):
-> **every ETC1S/UASTC encode and decode path is now pure C3**; only the
-> library's Zstd still comes from the bundled basisu lib until the phase-6
-> cutover. Decoding: RGBA32 transcodes are bit-exact against the basisu
-> transcoder on the golden corpus (all 19 UASTC modes, BasisLZ
-> codebooks/slices incl. alpha); BC1/BC3/BC7 targets go through the library's
-> own BCn encoders. UASTC encoding (phase 4): trial encode over basisu's
-> Faster mode set — beats basisu's q90/e2 PSNR on the whole corpus; without
-> RDO, smooth-content files run larger (~2x worst case), and ETC1/EAC
-> transcode hints are zeroed (quality-only cost on those targets; solid
-> blocks carry real hints). ETC1S encoding (phase 5): k-means codebook
-> frontend following basisu's quality curve + a spec-conformant BasisLZ
-> backend — PSNR within ~0.7 dB of basisu at q90 (ahead on some images),
-> sizes −4..+10% at q10 and +6..32% at q90 (frontend iteration ongoing).
-> Everything passes official `ktx validate` and basisu's transcoder decodes
-> our files bit-identically to ours. `extract`, the C API and
-> `basis::transcode`/`basis::encode` use the C3 paths automatically;
-> `extract --ffi` / `create --ffi` force basisu (how `test/gen-golden.sh`
-> keeps its oracles honest).
+> The pure-C3 rewrite of basis_universal is complete (`docs/basis-rewrite.md`,
+> phases 0–6): codecs, container assembly and Zstd linkage no longer involve
+> basisu at all. How it was proven, while basisu was still linked: decoding is
+> bit-exact against the basisu transcoder on a recorded golden corpus (all 19
+> UASTC modes, BasisLZ codebooks/slices incl. alpha), and basisu's transcoder
+> decoded C3-encoded files bit-identically to ours across every format, shape
+> and mip level. Quality vs basisu at q90/e2: UASTC beats basisu's PSNR on the
+> whole corpus (no RDO — smooth-content files run larger, ~2x worst case;
+> ETC1/EAC transcode hints are zeroed except solid blocks); ETC1S is within
+> ~0.7 dB (ahead on some images), sizes −4..+10% at q10 and +6..32% at q90
+> (frontend iteration ongoing). Everything passes official `ktx validate`.
 
-All ETC1S/UASTC encoding and decoding is pure C3 (`src/ktx/{uastc,etc1s}.c3`).
-The bundled
-[basis_universal](https://github.com/BinomialLLC/basis_universal) static lib
-(`<target>/libbasisu.a`, bound in `src/ktx/basis.c3`) currently remains linked
-for its Zstd and as the test oracle, until the phase-6 cutover to a plain
-zstd lib:
+All ETC1S/UASTC encoding and decoding is pure C3 (`src/ktx/{uastc,etc1s}.c3`,
+assembled into KTX2 by `src/ktx/basis.c3`) — no
+[basis_universal](https://github.com/BinomialLLC/basis_universal) is linked;
+its recorded output remains the test oracle (see Tests):
 
 ```sh
 # ETC1S + BasisLZ: smallest downloads, codebook-based
 build/ktx create --format etc1s -o albedo.ktx2 albedo.png
 
-# UASTC 4x4 + Zstd: higher quality, transcodes to BC7/ASTC near-losslessly
+# UASTC 4x4 + Zstd: higher quality, transcodes to BC7 near-losslessly
 build/ktx create --format uastc --quality 95 --effort 4 -o albedo.ktx2 albedo.png
 
 # non-color data (normals, masks) uses the linear variants
@@ -172,18 +162,18 @@ packing level (mode-set size) while `--quality` has no effect (it tuned
 basisu's RDO, which the C3 encoder doesn't do yet). Both default to
 `--quality 90 --effort 2`.
 
-basis_universal is C++, so the final binary links a C++ runtime (handled by the
-manifest). Its bundled zstd also serves the container's Zstd path, so **no system
-libzstd is needed**. The static libs are prebuilt and bundled per platform, so
-this works out of the box. basis_universal itself is *not* vendored; to rebuild
-the libs from source (only needed to bump basis or add a platform), run the build
-script — it fetches basis at a pinned commit into `native/` (gitignored):
+Transcode targets are RGBA32, BC1, BC3 and BC7 (BCn via the library's own
+encoders). The only native dependency is zstd — prebuilt per platform as
+`<target>/libzstd.a`, so this works out of the box with **no system libzstd
+and no C++ runtime**. zstd is *not* vendored; to rebuild the lib (only needed
+to bump zstd or add a platform), run the build script — it fetches the pinned
+release into `native/` (gitignored):
 
 ```sh
-native/build-basisu.sh    # -> <target>/libbasisu.a
+native/build-zstd.sh    # -> <target>/libzstd.a
 ```
 
-CI builds every platform this way via `.github/workflows/build-basisu.yml`.
+CI builds every platform this way via `.github/workflows/build-zstd.yml`.
 
 ## Releases: prebuilt shared libraries for FFI
 
@@ -198,7 +188,7 @@ named per target:
 ```
 ktx-macos-aarch64.dylib   ktx-macos-x64.dylib
 ktx-linux-x64.so          ktx-windows-x64.dll   ktx-windows-x64.lib
-libbasisu-<triple>.a      basisu-windows-x64.lib
+libzstd-<triple>.a        zstd-windows-x64.lib
 ```
 
 so a consumer can fetch exactly one file, e.g.

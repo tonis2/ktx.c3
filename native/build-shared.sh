@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build the libktx shared library (C API from src/capi + library modules from
-# src/ktx) for the host target, linking the prebuilt <target>/libbasisu.a.
+# src/ktx) for the host target, linking the prebuilt <target>/libzstd.a.
 # The result lands next to it: <target>/libktx.so / libktx.dylib.
 #
 # Consumers (e.g. the Blender glTF exporter addon) load it via ctypes/FFI —
 # see src/capi/capi.c3 for the exported functions.
 #
-# Requires <target>/libbasisu.a built WITH PIC (native/build-basisu.sh does
+# Requires <target>/libzstd.a built WITH PIC (native/build-zstd.sh does
 # this). Usage:  native/build-shared.sh [target-triple]
 #
 # The triple names match c3c --list-targets, so a non-host triple simply
@@ -34,22 +34,15 @@ if [ "$triple" != "$host" ]; then
 fi
 OUT="$REPO_ROOT/$triple"
 
-if [ ! -f "$OUT/libbasisu.a" ]; then
-  echo "$OUT/libbasisu.a missing — run native/build-basisu.sh $triple first" >&2
+if [ ! -f "$OUT/libzstd.a" ]; then
+  echo "$OUT/libzstd.a missing — run native/build-zstd.sh $triple first" >&2
   exit 1
 fi
-
-# Per-OS C++ runtime for the statically linked basis_universal.
-case "$triple" in
-  macos-*) cpplibs=(-l c++) ;;
-  linux-*) cpplibs=(-l stdc++ -l m -l pthread) ;;
-  *) echo "no C++ runtime mapping for $triple" >&2; exit 1 ;;
-esac
 
 cd "$REPO_ROOT"
 c3c dynamic-lib src/ktx/*.c3 src/capi/*.c3 \
   -O2 --reloc=PIC \
-  -L "$OUT" -l basisu "${cpplibs[@]}" \
+  -L "$OUT" -l zstd \
   --no-headers ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} \
   -o "$OUT/ktx"
 

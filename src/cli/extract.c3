@@ -17,7 +17,6 @@ options:
   -f, --face <n>     cubemap face (default 0)
   -r, --raw          write the raw (inflated) image bytes instead of PNG
                      (for ETC1S/UASTC inputs: the transcoded RGBA32 pixels)
-      --ffi          force the basis_universal transcoder for ETC1S/UASTC
                      (bypasses the pure-C3 decoders; used by test/gen-golden.sh)
   -o, --output <path>
   -h, --help         this help`;
@@ -28,7 +27,6 @@ fn int cmd_extract(String[] args)
 	int layer;
 	int face;
 	bool raw_flag;
-	bool ffi_flag;
 	String output;
 
 	int? end = opt::@parse(args,
@@ -36,7 +34,6 @@ fn int cmd_extract(String[] args)
 		"a", "layer", &layer,
 		"f", "face", &face,
 		"r", "raw", &raw_flag,
-		null, "ffi", &ffi_flag,
 		"o", "output", &output,
 		"h*", "help", null);
 	if (catch err = end)
@@ -58,7 +55,7 @@ fn int cmd_extract(String[] args)
 		return 1;
 	}
 
-	if (catch err = extract(inputs[0], output, (uint)level, (uint)layer, (uint)face, raw_flag, ffi_flag))
+	if (catch err = extract(inputs[0], output, (uint)level, (uint)layer, (uint)face, raw_flag))
 	{
 		io::eprintfn("error: %s", err);
 		return 1;
@@ -66,7 +63,7 @@ fn int cmd_extract(String[] args)
 	return 0;
 }
 
-fn void? extract(String input, String output, uint level, uint layer, uint face, bool raw_flag, bool ffi_flag = false) @local => @pool()
+fn void? extract(String input, String output, uint level, uint layer, uint face, bool raw_flag) @local => @pool()
 {
 	char[] data = file::load(tmem, input)!;
 	if (data.len < container::HEADER_SIZE || data[:12] != container::IDENTIFIER[..])
@@ -81,7 +78,7 @@ fn void? extract(String input, String output, uint level, uint layer, uint face,
 	// which has no ETC1S/UASTC decoder.
 	if (util::rd32(data, 12) == 0)
 	{
-		extract_basis(data, output, level, layer, face, raw_flag, ffi_flag)!;
+		extract_basis(data, output, level, layer, face, raw_flag)!;
 		return;
 	}
 
@@ -117,7 +114,7 @@ fn void? extract(String input, String output, uint level, uint layer, uint face,
 <* Transcode one image of an ETC1S/UASTC BasisLZ file to RGBA8 and write it as
    PNG, or as raw RGBA32 bytes with `raw_flag` (used by test/gen-golden.sh to
    record decode oracles). *>
-fn void? extract_basis(char[] data, String output, uint level, uint layer, uint face, bool raw_flag, bool ffi_flag) @local
+fn void? extract_basis(char[] data, String output, uint level, uint layer, uint face, bool raw_flag) @local
 {
 	basis::Info bi = basis::info(data)!;
 	uint layers = max(bi.layers, 1u);   // KTX2 reports 0 layers for a plain 2D texture
@@ -136,9 +133,7 @@ fn void? extract_basis(char[] data, String output, uint level, uint layer, uint 
 		io::eprintfn("face %d out of range (file has %d)", face, bi.faces);
 		return BAD_ARGUMENTS~;
 	}
-	basis::Transcoded t = ffi_flag
-		? basis::transcode_ffi(tmem, data, level, layer, face, basis::TF_RGBA32, 4)!
-		: basis::transcode(tmem, data, level, layer, face, basis::TF_RGBA32, 4)!;
+	basis::Transcoded t = basis::transcode(tmem, data, level, layer, face, basis::TF_RGBA32, 4)!;
 	if (raw_flag)
 	{
 		file::save(output, t.data)!;
