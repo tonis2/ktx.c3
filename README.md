@@ -146,3 +146,22 @@ native/build-basisu.sh    # -> <target>/libbasisu.a
 ```
 
 CI builds every platform this way via `.github/workflows/build-basisu.yml`.
+
+## Releases: prebuilt shared libraries for FFI
+
+`native/build-shared.sh` also builds libktx as a shared library
+(`<target>/ktx.{so,dylib,dll}`, C API in `src/capi`) for non-C3 consumers
+loading it via FFI — e.g. the Blender glTF addon, which decodes/encodes KTX2
+through ctypes. These shared libs are **not** committed; pushing a `v*` tag
+runs `.github/workflows/release.yml`, which rebuilds every platform and
+attaches the libs to the tag's GitHub release as raw files (no archives),
+named per target:
+
+```
+ktx-macos-aarch64.dylib   ktx-macos-x64.dylib
+ktx-linux-x64.so          ktx-windows-x64.dll   ktx-windows-x64.lib
+libbasisu-<triple>.a      basisu-windows-x64.lib
+```
+
+so a consumer can fetch exactly one file, e.g.
+`https://github.com/tonis2/ktx.c3/releases/latest/download/ktx-macos-aarch64.dylib`.

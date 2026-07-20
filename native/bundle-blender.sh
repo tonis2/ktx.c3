@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Copy the built libktx shared libraries into a Blender addon that loads them
-# via ctypes (see the gltf-exporter addon's ktx_lib.py: it expects
-# <addon>/bin/<triple>/ktx.{so,dylib,dll}).
+# DEV TOOL: copy locally built libktx shared libraries into a Blender addon
+# that loads them via ctypes (the gltf-exporter addon's ktx_lib.py checks
+# <addon>/bin/<triple>/ktx.{so,dylib,dll} before its downloaded copy). End
+# users don't need this — the addon downloads the lib for their platform from
+# this repo's GitHub releases (see .github/workflows/release.yml).
 #
 # Usage:  native/bundle-blender.sh <addon-dir> [triple ...]
 #   With no triples given, every <triple>/ dir in the repo that contains a
