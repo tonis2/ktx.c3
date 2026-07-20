@@ -119,21 +119,33 @@ Exit criteria: all `bt_*` externs unused; transcode tests green.
 Compliance is binary (official tools must read it); quality is a dial we
 track with PSNR/size tables.
 
-- [ ] Pick the starter mode set (what basisu uses at low pack levels:
+- [x] Pick the starter mode set (what basisu uses at low pack levels:
       void-extent, mode 8, plus ~4–6 workhorse modes covering 1-subset RGB,
-      RGBA, and 2-subset).
-- [ ] Per-mode trial encode: PCA/least-squares endpoint fit, weight
-      quantization, pick lowest-MSE mode per block.
-- [ ] Encode path: blocks → KTX2 level data → zstd supercompress (existing
+      RGBA, and 2-subset). → basisu's Faster set: modes 0/4/6 (RGB), 9/11/12
+      (RGBA), 15/17 (LA) + solid; effort maps to pack level like the wasm API,
+      level 0 restricts to the Fastest subset.
+- [x] Per-mode trial encode: PCA/least-squares endpoint fit, weight
+      quantization, pick lowest-MSE mode per block. (Exact reconstruction
+      through the decoder's own unquant/interpolate for weight choice + MSE;
+      encode_block asserts pack→decode reproduces the trial error.)
+- [x] Encode path: blocks → KTX2 level data → zstd supercompress (existing
       writer in `container.c3`), mips via `mipgen.c3`, sRGB/linear DFD via
-      `dfd.c3`.
-- [ ] Interop gate: `ktx validate` clean; official basisu CLI transcodes our
-      files; our own phase-1 decoder round-trips bit-exact.
-- [ ] Quality gate on the corpus vs basisu at q90/e2: PSNR within ~1 dB,
+      `dfd.c3`. (DFD byte-identical to basisu's; `create --ffi` keeps
+      gen-golden.sh's oracles on the basisu encoder.)
+- [x] Interop gate: `ktx validate` clean (v4.4.0, incl. mips/cube/array);
+      official basisu transcodes our files bit-identically to our decoder
+      (asserted per level in test/basis_enc_test.c3); phase-1 decoder
+      round-trips bit-exact.
+- [x] Quality gate on the corpus vs basisu at q90/e2: PSNR within ~1 dB,
       file size within ~25% (no RDO yet — sizes WILL be bigger; record the
-      gap, don't block on it).
+      gap, don't block on it). → C3 beats basisu's PSNR on all 5 corpus
+      images (+0.1 to +10.5 dB); sizes within ±7% except the smooth gradient
+      (+~2x — that's basisu's RDO trading PSNR for size on smooth content).
+      Transcode hints are written as zeros (except solid blocks, where the
+      authoritative ETC1 hint is computed) — quality-only cost on ETC1/EAC
+      transcode targets.
 - [ ] Thread per-block encoding (embarrassingly parallel) once correct.
-- [ ] Swap `basis.c3` UASTC encode to C3.
+- [x] Swap `basis.c3` UASTC encode to C3.
 - [ ] (Later, optional) RDO pass for zstd-friendlier blocks to close the
       size gap.
 

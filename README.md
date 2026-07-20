@@ -102,9 +102,13 @@ sh test/gen-golden.sh       # regenerate the basis decode oracles in test/golden
 
 `test/images/` holds a small committed corpus (smooth gradient, high-detail,
 alpha, normal map — 64x64 each). `test/gen-golden.sh` encodes it across an
-ETC1S/UASTC × quality × mips matrix with the basisu-backed build and records
-every level's RGBA32 transcode; the in-progress pure-C3 basis codec
-(see `docs/basis-rewrite.md`) is diffed bit-exactly against those dumps.
+ETC1S/UASTC × quality × mips matrix with the basisu encoder (`create --ffi`)
+and records every level's RGBA32 transcode via the basisu transcoder
+(`extract --ffi`), plus the raw source pixels; the pure-C3 basis codec
+(see `docs/basis-rewrite.md`) is diffed bit-exactly against those dumps, and
+the C3 UASTC encoder's PSNR/size is gated against the recorded basisu files.
+`cross-validate.sh` picks up the official tool from `$PATH` or a prebuilt
+KTX-Software release unpacked into `native/ktxtools/`.
 
 Cross-checks performed during development: all written files pass official
 `ktx validate` with zero warnings; files created by the official `ktx create`
@@ -115,18 +119,27 @@ basis_universal's unpackers.
 
 > A pure-C3 replacement for basis_universal (decode first, then encode) is in
 > progress — see `docs/basis-rewrite.md` for the plan and current status.
-> Landed so far (phases 0–3): the golden-oracle test harness, `ktx::bits`
+> Landed so far (phases 0–4): the golden-oracle test harness, `ktx::bits`
 > (LSB-first bit I/O), `ktx::huffman` (canonical Huffman, basisu-format
-> tables), `ktx::uastc` and `ktx::etc1s` — **all ETC1S/UASTC decoding is now
-> pure C3**: RGBA32 transcodes are bit-exact against the basisu transcoder on
-> the golden corpus (all 19 UASTC modes, BasisLZ codebooks/slices incl.
-> alpha), and BC1/BC3/BC7 targets go through the library's own BCn encoders
-> (better PSNR than basisu's fast transcode on BC7, within ~2 dB on BC1/BC3).
-> `extract`, the C API and `basis::transcode` use the C3 paths automatically;
-> `extract --ffi` forces basisu (how `test/gen-golden.sh` keeps its oracles
-> honest). Encoding still uses bundled basisu until phases 4–5 land.
+> tables), `ktx::uastc` and `ktx::etc1s` — **all ETC1S/UASTC decoding and
+> UASTC encoding are now pure C3**. Decoding: RGBA32 transcodes are bit-exact
+> against the basisu transcoder on the golden corpus (all 19 UASTC modes,
+> BasisLZ codebooks/slices incl. alpha), and BC1/BC3/BC7 targets go through
+> the library's own BCn encoders (better PSNR than basisu's fast transcode on
+> BC7, within ~2 dB on BC1/BC3). Encoding (phase 4): `--format uastc` files
+> are built entirely in C3 (trial encode over basisu's Faster mode set, KTX2
+> + Zstd via `container.c3`) — they pass official `ktx validate`, basisu's
+> transcoder decodes them bit-identically to ours, and PSNR beats basisu's
+> q90/e2 output on the whole corpus; without RDO, smooth-content files run
+> larger (~2x on the gradient image, ±7% elsewhere), and ETC1/EAC transcode
+> hints are zeroed (quality-only cost on those targets; solid blocks carry
+> real hints). `extract`, the C API and `basis::transcode`/`basis::encode`
+> use the C3 paths automatically; `extract --ffi` / `create --ffi` force
+> basisu (how `test/gen-golden.sh` keeps its oracles honest). ETC1S encoding
+> still uses bundled basisu until phase 5 lands.
 
-ETC1S and UASTC 4x4 encoding plus BasisLZ/Zstd transcoding are provided by
+UASTC 4x4 encoding and all ETC1S/UASTC decoding are pure C3; ETC1S encoding
+is still provided by
 [basis_universal](https://github.com/BinomialLLC/basis_universal), linked as a
 prebuilt static lib (`<target>/libbasisu.a`) and bound in `src/ktx/basis.c3`:
 
@@ -151,8 +164,10 @@ build/ktx extract --level 1 --face 2 -o f.png env.ktx2    # a specific level/lay
 ```
 
 `--quality` (0–100) and `--effort` (0–10) tune the encoder: for ETC1S they map
-to codebook size and compression level; for UASTC to the RDO quality and packing
-level (quality 100 = no RDO). Both default to `--quality 90 --effort 2`.
+to codebook size and compression level; for UASTC `--effort` picks the packing
+level (mode-set size), while `--quality` currently has no effect (it tuned
+basisu's RDO, which the C3 encoder doesn't do yet). Both default to
+`--quality 90 --effort 2`.
 
 basis_universal is C++, so the final binary links a C++ runtime (handled by the
 manifest). Its bundled zstd also serves the container's Zstd path, so **no system
