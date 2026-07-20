@@ -16,6 +16,11 @@ fn void wr64(char[] buf, sz offset, ulong v) @inline
 	wr32(buf, offset + 4, (uint)(v >> 32));
 }
 
+fn uint rd16(char[] buf, sz offset) @inline
+{
+	return (uint)buf[offset] | (uint)buf[offset + 1] << 8;
+}
+
 fn uint rd32(char[] buf, sz offset) @inline
 {
 	return (uint)buf[offset]

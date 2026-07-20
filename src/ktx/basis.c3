@@ -6,6 +6,7 @@
 // Encode produces a complete KTX2 blob (BU_COMP_FLAGS_KTX2_OUTPUT); transcode
 // turns an ETC1S/UASTC KTX2 into a GPU block format (BC7/BC1/...) or RGBA32.
 module ktx::basis;
+import ktx::container, ktx::dfd, ktx::util, ktx::uastc, ktx::etc1s, ktx::bc7, ktx::bcn;
 import std::core::mem;
 
 faultdef ENCODE_FAILED, OPEN_FAILED, START_FAILED, TRANSCODE_FAILED;
@@ -155,13 +156,180 @@ struct Transcoded
 	uint height;
 }
 
+<* DFD color model of a KTX2 blob (dfd::MODEL_UASTC / MODEL_ETC1S for basis files). *>
+fn uint dfd_model(char[] ktx2) @local
+{
+	if (ktx2.len < container::HEADER_SIZE) return 0;
+	uint dfd_off = util::rd32(ktx2, 48);
+	uint dfd_len = util::rd32(ktx2, 52);
+	if (!dfd_len || (sz)dfd_off + dfd_len > ktx2.len) return 0;
+	dfd::Info? info = dfd::parse(ktx2[dfd_off:dfd_len]);
+	if (catch info) return 0;
+	return info.model;
+}
+
+<*
+ Pure-C3 RGBA32 transcode of one image of a UASTC KTX2 blob
+ (docs/basis-rewrite.md phase 1): container read (undoing Zstd
+ supercompression) -> per-block UASTC decode. Bit-exact with basisu's
+ transcoder, which test/uastc_test.c3 checks against golden dumps.
+*>
+fn Transcoded? transcode_uastc_rgba32(Allocator allocator, char[] ktx2, uint level, uint layer, uint face) @local => @pool()
+{
+	container::Texture tex = container::read(tmem, ktx2)!;
+	if (level >= tex.level_count()) return TRANSCODE_FAILED~;
+	if (layer >= tex.layers() || face >= tex.face_count) return TRANSCODE_FAILED~;
+
+	uint w = tex.level_width(level);
+	uint h = tex.level_height(level);
+	// vkFormat is 0 for basis files, so Texture.image() can't size the images;
+	// slice the level payload by block count directly.
+	usz img_size = (usz)((w + 3) / 4) * (usz)((h + 3) / 4) * 16;
+	usz offset = ((usz)layer * tex.face_count + face) * img_size;
+	char[] level_data = tex.levels[level];
+	if (offset + img_size > level_data.len) return TRANSCODE_FAILED~;
+
+	char* buf = alloc::malloc(allocator, (sz)((usz)w * h * 4));
+	char[] rgba = buf[:(usz)w * h * 4];
+	if (catch err = uastc::decode_image(level_data[offset:img_size], rgba, w, h))
+	{
+		alloc::free(allocator, buf);
+		return err~;
+	}
+	return { .data = rgba, .width = w, .height = h };
+}
+
 <*
  Transcode one image (level/layer/face) of an ETC1S/UASTC KTX2 blob to the
  given TF_* target. `unit_bytes` is the target's bytes-per-block (16 for
  BC7/BC3, 8 for BC1/BC4) or bytes-per-pixel (4 for TF_RGBA32). The returned
  slice is allocated from `allocator`.
+
+ UASTC -> RGBA32 runs in pure C3; everything else still goes through the
+ bundled basis_universal transcoder.
 *>
 fn Transcoded? transcode(Allocator allocator, char[] ktx2, uint level, uint layer, uint face, uint tf_format, uint unit_bytes)
+{
+	uint model = dfd_model(ktx2);
+	if (model == dfd::MODEL_UASTC || model == dfd::MODEL_ETC1S)
+	{
+		switch (tf_format)
+		{
+			case TF_RGBA32:
+				return model == dfd::MODEL_UASTC
+					? transcode_uastc_rgba32(allocator, ktx2, level, layer, face)
+					: transcode_etc1s_rgba32(allocator, ktx2, level, layer, face);
+			case TF_BC1_RGB:
+			case TF_BC3_RGBA:
+			case TF_BC7_RGBA:
+				return transcode_bcn(allocator, ktx2, level, layer, face, tf_format, model);
+			default:
+				break;
+		}
+	}
+	return transcode_ffi(allocator, ktx2, level, layer, face, tf_format, unit_bytes);
+}
+
+<*
+ BC1/BC3/BC7 targets without basisu (docs/basis-rewrite.md phase 3): pure-C3
+ RGBA decode, then the library's own BCn encoders. Correct output rather than
+ basisu's specialized block-level transcode — quality tracked by
+ test/transcode_bcn_test.c3.
+*>
+fn Transcoded? transcode_bcn(Allocator allocator, char[] ktx2, uint level, uint layer, uint face, uint tf_format, uint model) @local => @pool()
+{
+	Transcoded src = model == dfd::MODEL_UASTC
+		? transcode_uastc_rgba32(tmem, ktx2, level, layer, face)!
+		: transcode_etc1s_rgba32(tmem, ktx2, level, layer, face)!;
+
+	char[] blocks;
+	switch (tf_format)
+	{
+		case TF_BC1_RGB:  blocks = bcn::encode(allocator, bcn::BcnFormat.BC1, src.data, src.width, src.height)!;
+		case TF_BC3_RGBA: blocks = bcn::encode(allocator, bcn::BcnFormat.BC3, src.data, src.width, src.height)!;
+		default:          blocks = bc7::encode(allocator, src.data, src.width, src.height)!;
+	}
+	return { .data = blocks, .width = src.width, .height = src.height };
+}
+
+<*
+ Pure-C3 RGBA32 transcode of one image of an ETC1S/BasisLZ KTX2 blob
+ (docs/basis-rewrite.md phase 2). The BasisLZ level payloads are not
+ Zstd-compressed (the slices themselves are the compression), so this parses
+ the level index and supercompressionGlobalData directly instead of going
+ through container::read.
+*>
+fn Transcoded? transcode_etc1s_rgba32(Allocator allocator, char[] ktx2, uint level, uint layer, uint face) @local => @pool()
+{
+	if (ktx2.len < container::HEADER_SIZE) return OPEN_FAILED~;
+	uint width = util::rd32(ktx2, 20);
+	uint height = util::rd32(ktx2, 24);
+	uint layers = max(util::rd32(ktx2, 32), 1u);
+	uint face_count = max(util::rd32(ktx2, 36), 1u);
+	uint level_count = max(util::rd32(ktx2, 40), 1u);
+	ulong sgd_off = util::rd64(ktx2, 64);
+	ulong sgd_len = util::rd64(ktx2, 72);
+	if (level >= level_count || layer >= layers || face >= face_count) return TRANSCODE_FAILED~;
+	if (!sgd_len || sgd_off + sgd_len > ktx2.len) return OPEN_FAILED~;
+
+	// supercompressionGlobalData: counts/lengths header, per-image slice
+	// descs, then the endpoint / selector / Huffman-table sections.
+	char[] sgd = ktx2[(sz)sgd_off:(sz)sgd_len];
+	if (sgd.len < 20) return OPEN_FAILED~;
+	uint num_endpoints = util::rd16(sgd, 0);
+	uint num_selectors = util::rd16(sgd, 2);
+	ulong endpoints_len = util::rd32(sgd, 4);
+	ulong selectors_len = util::rd32(sgd, 8);
+	ulong tables_len = util::rd32(sgd, 12);
+	uint num_images = level_count * layers * face_count;
+	usz descs_end = 20 + (usz)num_images * 20;
+	if (descs_end + endpoints_len + selectors_len + tables_len > sgd.len) return OPEN_FAILED~;
+	char[] endpoints_data = sgd[descs_end : (sz)endpoints_len];
+	char[] selectors_data = sgd[descs_end + (sz)endpoints_len : (sz)selectors_len];
+	char[] tables_data = sgd[descs_end + (sz)endpoints_len + (sz)selectors_len : (sz)tables_len];
+
+	usz desc = 20 + ((usz)level * layers * face_count + (usz)layer * face_count + face) * 20;
+	uint rgb_off = util::rd32(sgd, (sz)desc + 4);
+	uint rgb_len = util::rd32(sgd, (sz)desc + 8);
+	uint alpha_off = util::rd32(sgd, (sz)desc + 12);
+	uint alpha_len = util::rd32(sgd, (sz)desc + 16);
+
+	ulong level_off = util::rd64(ktx2, container::HEADER_SIZE + (sz)level * container::LEVEL_ENTRY_SIZE);
+	ulong level_len = util::rd64(ktx2, container::HEADER_SIZE + (sz)level * container::LEVEL_ENTRY_SIZE + 8);
+	if (level_off + level_len > ktx2.len) return OPEN_FAILED~;
+	char[] level_data = ktx2[(sz)level_off:(sz)level_len];
+	if ((ulong)rgb_off + rgb_len > level_data.len) return OPEN_FAILED~;
+	if (alpha_len && (ulong)alpha_off + alpha_len > level_data.len) return OPEN_FAILED~;
+
+	etc1s::Codebook cb = etc1s::decode_codebook(tmem, num_endpoints, endpoints_data,
+		num_selectors, selectors_data, tables_data)!;
+
+	uint w = max(width >> level, 1u);
+	uint h = max(height >> level, 1u);
+	char* buf = alloc::malloc(allocator, (sz)((usz)w * h * 4));
+	char[] rgba = buf[:(usz)w * h * 4];
+	bool ok;
+	defer if (!ok) alloc::free(allocator, buf);
+
+	if (alpha_len)
+	{
+		cb.decode_slice(level_data[alpha_off:alpha_len], w, h, rgba, etc1s::Pass.ALPHA, tmem)!;
+		cb.decode_slice(level_data[rgb_off:rgb_len], w, h, rgba, etc1s::Pass.RGB, tmem)!;
+	}
+	else
+	{
+		cb.decode_slice(level_data[rgb_off:rgb_len], w, h, rgba, etc1s::Pass.RGB_OPAQUE, tmem)!;
+	}
+	ok = true;
+	return { .data = rgba, .width = w, .height = h };
+}
+
+<*
+ Transcode through the bundled basis_universal FFI, bypassing the pure-C3
+ decoders. test/gen-golden.sh records its decode oracles through this so the
+ reference stays basisu even while `transcode` migrates to C3.
+*>
+fn Transcoded? transcode_ffi(Allocator allocator, char[] ktx2, uint level, uint layer, uint face, uint tf_format, uint unit_bytes)
 {
 	init();
 	ulong km = bt_alloc((ulong)ktx2.len);

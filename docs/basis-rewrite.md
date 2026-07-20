@@ -42,19 +42,19 @@ parts not yet written.
 Everything later is diffed against references, so build the harness first,
 while basisu is still linked.
 
-- [ ] Create a small committed test corpus in `test/images/`: 4–6 crops
+- [x] Create a small committed test corpus in `test/images/`: 4–6 crops
       (e.g. 64x64 / 128x128) from `basis_universal/test_files` kodim set —
       one smooth-gradient, one high-detail, one with alpha, one normal-map.
       Small enough to commit, varied enough to catch codec regressions.
-- [ ] `test/gen-golden.sh`: with the CURRENT basisu-backed build, encode the
+- [x] `test/gen-golden.sh`: with the CURRENT basisu-backed build, encode the
       corpus at a settings matrix (etc1s/uastc × quality 10/50/90 × mips
       on/off) into `test/golden/` (gitignored), and dump each one's RGBA32
       transcode as `.bin` next to it. These are the decode oracles.
-- [ ] Add a PSNR helper to the test utils (RGBA in, dB out) for encoder
+- [x] Add a PSNR helper to the test utils (RGBA in, dB out) for encoder
       quality tracking.
-- [ ] `src/ktx/bits.c3`: bit reader/writer + tests (aligned/unaligned reads,
+- [x] `src/ktx/bits.c3`: bit reader/writer + tests (aligned/unaligned reads,
       64-bit spans, write-then-read round trips).
-- [ ] `src/ktx/huffman.c3`: canonical Huffman decode AND encode (code-length
+- [x] `src/ktx/huffman.c3`: canonical Huffman decode AND encode (code-length
       assignment, the basis size limits) + round-trip tests. Both later
       phases consume this.
 
@@ -65,18 +65,18 @@ Exit criteria: golden corpus generates reproducibly; bits/huffman tests pass.
 Spec: Binomial's UASTC spec (in the basis_universal repo) + KTX2 spec.
 Fully deterministic, so "done" = bit-exact.
 
-- [ ] Mode tables: the 19 LDR modes (+ void-extent), endpoint/weight ranges,
+- [x] Mode tables: the 19 LDR modes (+ void-extent), endpoint/weight ranges,
       subset counts, CEM values.
-- [ ] BISE/trit/quint unquantization tables for endpoints and weights.
-- [ ] ASTC partition-pattern function for the 2/3-subset modes (UASTC uses
+- [x] BISE/trit/quint unquantization tables for endpoints and weights.
+- [x] ASTC partition-pattern function for the 2/3-subset modes (UASTC uses
       a fixed small set of seeds — table them, don't port the full hash).
-- [ ] Block decode: header parse → endpoints → weights → interpolate →
+- [x] Block decode: header parse → endpoints → weights → interpolate →
       4x4 RGBA. Include void-extent and the blue-contract/decode quirks the
       spec calls out.
-- [ ] KTX2 path: level data → zstd decompress (existing `zstd.c3`) →
+- [x] KTX2 path: level data → zstd decompress (existing `zstd.c3`) →
       per-block decode → image. Wire as the `TF_RGBA32` branch for UASTC in
       `basis.c3` (C3 first, basisu for everything else).
-- [ ] Differential test: decode every UASTC golden bit-exactly equal to the
+- [x] Differential test: decode every UASTC golden bit-exactly equal to the
       recorded basisu RGBA32 dump.
 
 Exit criteria: bit-exact on the whole golden matrix; `basis_test.c3` +
@@ -87,27 +87,27 @@ capi smoke test still green.
 Spec: "ETC1S global data" + slice format in the KTX2 spec appendix (Khronos
 required full documentation — it is all there).
 
-- [ ] ETC1S block decode: 5-bit base color, 3-bit intensity table index,
+- [x] ETC1S block decode: 5-bit base color, 3-bit intensity table index,
       2-bit selectors → RGBA (ETC1 differential subset only).
-- [ ] Parse `supercompressionGlobalData`: endpoint codebook, selector
+- [x] Parse `supercompressionGlobalData`: endpoint codebook, selector
       codebook, Huffman code-length tables.
-- [ ] Slice decode: Huffman-coded endpoint/selector indices with the
+- [x] Slice decode: Huffman-coded endpoint/selector indices with the
       delta/repeat (RLE) prediction scheme → block stream.
-- [ ] Alpha: RGBA files carry a second (alpha) slice per image — decode and
+- [x] Alpha: RGBA files carry a second (alpha) slice per image — decode and
       merge.
-- [ ] Wire as the ETC1S `TF_RGBA32` branch in `basis.c3`.
-- [ ] Differential test: bit-exact vs the ETC1S golden RGBA dumps.
+- [x] Wire as the ETC1S `TF_RGBA32` branch in `basis.c3`.
+- [x] Differential test: bit-exact vs the ETC1S golden RGBA dumps.
 
 Exit criteria: bit-exact on the golden matrix. Decode of ANY basis file is
 now pure C3.
 
 ## Phase 3 — BCn transcode targets without basisu (~2–3 days)
 
-- [ ] Route `TF_BC1/BC3/BC7` through: C3 decode (phases 1–2) → existing
+- [x] Route `TF_BC1/BC3/BC7` through: C3 decode (phases 1–2) → existing
       `bcn.c3`/`bc7.c3` encoders. Correct output, slower than basisu's
       block-level transcoders — fine, and it removes the last *decode-side*
       basisu dependency.
-- [ ] Compare quality (PSNR) against basisu's direct transcode on the
+- [x] Compare quality (PSNR) against basisu's direct transcode on the
       corpus; record the numbers in the test output.
 - [ ] (Later, optional) dedicated UASTC→BC7 block mapper if transcode speed
       ever matters; UASTC was designed for it.
