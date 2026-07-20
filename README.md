@@ -95,9 +95,16 @@ manifest links it plus a C++ runtime per platform.
 ## Tests
 
 ```sh
-c3c test                 # 59 unit tests: round-trips, KATs, alignment, DFD bytes
+c3c test                 # unit tests: round-trips, KATs, alignment, DFD bytes
 sh test/cross-validate.sh   # optional: validates output with the official ktx tool
+sh test/gen-golden.sh       # regenerate the basis decode oracles in test/golden/
 ```
+
+`test/images/` holds a small committed corpus (smooth gradient, high-detail,
+alpha, normal map — 64x64 each). `test/gen-golden.sh` encodes it across an
+ETC1S/UASTC × quality × mips matrix with the basisu-backed build and records
+every level's RGBA32 transcode; the in-progress pure-C3 basis codec
+(see `docs/basis-rewrite.md`) is diffed bit-exactly against those dumps.
 
 Cross-checks performed during development: all written files pass official
 `ktx validate` with zero warnings; files created by the official `ktx create`
@@ -105,6 +112,19 @@ read back pixel-exact; BCn/BC7 decoders verified bit-identical against
 basis_universal's unpackers.
 
 ## ETC1S / UASTC + BasisLZ (via basis_universal)
+
+> A pure-C3 replacement for basis_universal (decode first, then encode) is in
+> progress — see `docs/basis-rewrite.md` for the plan and current status.
+> Landed so far (phases 0–3): the golden-oracle test harness, `ktx::bits`
+> (LSB-first bit I/O), `ktx::huffman` (canonical Huffman, basisu-format
+> tables), `ktx::uastc` and `ktx::etc1s` — **all ETC1S/UASTC decoding is now
+> pure C3**: RGBA32 transcodes are bit-exact against the basisu transcoder on
+> the golden corpus (all 19 UASTC modes, BasisLZ codebooks/slices incl.
+> alpha), and BC1/BC3/BC7 targets go through the library's own BCn encoders
+> (better PSNR than basisu's fast transcode on BC7, within ~2 dB on BC1/BC3).
+> `extract`, the C API and `basis::transcode` use the C3 paths automatically;
+> `extract --ffi` forces basisu (how `test/gen-golden.sh` keeps its oracles
+> honest). Encoding still uses bundled basisu until phases 4–5 land.
 
 ETC1S and UASTC 4x4 encoding plus BasisLZ/Zstd transcoding are provided by
 [basis_universal](https://github.com/BinomialLLC/basis_universal), linked as a

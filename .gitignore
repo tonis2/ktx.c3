@@ -71,3 +71,6 @@ dkms.conf
 build/
 out/
 headers/
+
+# golden decode oracles, regenerated locally by test/gen-golden.sh
+test/golden/
