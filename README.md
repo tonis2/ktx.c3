@@ -117,31 +117,33 @@ basis_universal's unpackers.
 
 ## ETC1S / UASTC + BasisLZ (via basis_universal)
 
-> A pure-C3 replacement for basis_universal (decode first, then encode) is in
-> progress — see `docs/basis-rewrite.md` for the plan and current status.
-> Landed so far (phases 0–4): the golden-oracle test harness, `ktx::bits`
-> (LSB-first bit I/O), `ktx::huffman` (canonical Huffman, basisu-format
-> tables), `ktx::uastc` and `ktx::etc1s` — **all ETC1S/UASTC decoding and
-> UASTC encoding are now pure C3**. Decoding: RGBA32 transcodes are bit-exact
-> against the basisu transcoder on the golden corpus (all 19 UASTC modes,
-> BasisLZ codebooks/slices incl. alpha), and BC1/BC3/BC7 targets go through
-> the library's own BCn encoders (better PSNR than basisu's fast transcode on
-> BC7, within ~2 dB on BC1/BC3). Encoding (phase 4): `--format uastc` files
-> are built entirely in C3 (trial encode over basisu's Faster mode set, KTX2
-> + Zstd via `container.c3`) — they pass official `ktx validate`, basisu's
-> transcoder decodes them bit-identically to ours, and PSNR beats basisu's
-> q90/e2 output on the whole corpus; without RDO, smooth-content files run
-> larger (~2x on the gradient image, ±7% elsewhere), and ETC1/EAC transcode
-> hints are zeroed (quality-only cost on those targets; solid blocks carry
-> real hints). `extract`, the C API and `basis::transcode`/`basis::encode`
-> use the C3 paths automatically; `extract --ffi` / `create --ffi` force
-> basisu (how `test/gen-golden.sh` keeps its oracles honest). ETC1S encoding
-> still uses bundled basisu until phase 5 lands.
+> A pure-C3 replacement for basis_universal is nearly complete — see
+> `docs/basis-rewrite.md` for the plan and status. Landed (phases 0–5):
+> **every ETC1S/UASTC encode and decode path is now pure C3**; only the
+> library's Zstd still comes from the bundled basisu lib until the phase-6
+> cutover. Decoding: RGBA32 transcodes are bit-exact against the basisu
+> transcoder on the golden corpus (all 19 UASTC modes, BasisLZ
+> codebooks/slices incl. alpha); BC1/BC3/BC7 targets go through the library's
+> own BCn encoders. UASTC encoding (phase 4): trial encode over basisu's
+> Faster mode set — beats basisu's q90/e2 PSNR on the whole corpus; without
+> RDO, smooth-content files run larger (~2x worst case), and ETC1/EAC
+> transcode hints are zeroed (quality-only cost on those targets; solid
+> blocks carry real hints). ETC1S encoding (phase 5): k-means codebook
+> frontend following basisu's quality curve + a spec-conformant BasisLZ
+> backend — PSNR within ~0.7 dB of basisu at q90 (ahead on some images),
+> sizes −4..+10% at q10 and +6..32% at q90 (frontend iteration ongoing).
+> Everything passes official `ktx validate` and basisu's transcoder decodes
+> our files bit-identically to ours. `extract`, the C API and
+> `basis::transcode`/`basis::encode` use the C3 paths automatically;
+> `extract --ffi` / `create --ffi` force basisu (how `test/gen-golden.sh`
+> keeps its oracles honest).
 
-UASTC 4x4 encoding and all ETC1S/UASTC decoding are pure C3; ETC1S encoding
-is still provided by
-[basis_universal](https://github.com/BinomialLLC/basis_universal), linked as a
-prebuilt static lib (`<target>/libbasisu.a`) and bound in `src/ktx/basis.c3`:
+All ETC1S/UASTC encoding and decoding is pure C3 (`src/ktx/{uastc,etc1s}.c3`).
+The bundled
+[basis_universal](https://github.com/BinomialLLC/basis_universal) static lib
+(`<target>/libbasisu.a`, bound in `src/ktx/basis.c3`) currently remains linked
+for its Zstd and as the test oracle, until the phase-6 cutover to a plain
+zstd lib:
 
 ```sh
 # ETC1S + BasisLZ: smallest downloads, codebook-based
@@ -163,9 +165,10 @@ build/ktx extract -o out.png albedo.ktx2                  # transcode -> RGBA ->
 build/ktx extract --level 1 --face 2 -o f.png env.ktx2    # a specific level/layer/face
 ```
 
-`--quality` (0–100) and `--effort` (0–10) tune the encoder: for ETC1S they map
-to codebook size and compression level; for UASTC `--effort` picks the packing
-level (mode-set size), while `--quality` currently has no effect (it tuned
+`--quality` (0–100) and `--effort` (0–10) tune the encoder: for ETC1S
+`--quality` sets the codebook-size targets (following basisu's quality curve;
+`--effort` currently has no effect there); for UASTC `--effort` picks the
+packing level (mode-set size) while `--quality` has no effect (it tuned
 basisu's RDO, which the C3 encoder doesn't do yet). Both default to
 `--quality 90 --effort 2`.
 
