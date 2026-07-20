@@ -453,7 +453,7 @@ fn void EncodeTable.put(&self, bits::Writer* w, uint sym)
 }
 
 <* Symbols beyond the last one with a code are never transmitted. *>
-fn uint EncodeTable.total_used(&self) @local
+fn uint EncodeTable.total_used(&self)
 {
 	for (usz i = self.sizes.len; i > 0; i--)
 	{

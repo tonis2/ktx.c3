@@ -6,7 +6,7 @@
 // Encode produces a complete KTX2 blob (BU_COMP_FLAGS_KTX2_OUTPUT); transcode
 // turns an ETC1S/UASTC KTX2 into a GPU block format (BC7/BC1/...) or RGBA32.
 module ktx::basis;
-import ktx::container, ktx::dfd, ktx::util, ktx::uastc, ktx::etc1s, ktx::bc7, ktx::bcn;
+import ktx::container, ktx::dfd, ktx::util, ktx::uastc, ktx::etc1s, ktx::bc7, ktx::bcn, ktx::mipgen;
 import std::core::mem;
 
 faultdef ENCODE_FAILED, OPEN_FAILED, START_FAILED, TRANSCODE_FAILED;
@@ -103,8 +103,19 @@ struct EncodeOptions
  single 2D texture, array layers, or the six faces of a cubemap. ETC1S is
  BasisLZ-supercompressed; UASTC is Zstd-supercompressed. The returned slice is
  allocated from `allocator`.
+
+ UASTC encoding is pure C3 (ktx::uastc, docs/basis-rewrite.md phase 4); ETC1S
+ still goes through the bundled basisu encoder. `encode_ffi` forces basisu for
+ both — that is what keeps test/gen-golden.sh's oracles honest.
 *>
 fn char[]? encode(Allocator allocator, uint fmt, char[][] images, uint w, uint h, TexType type, EncodeOptions opts)
+{
+	if (fmt == UASTC_4X4) return encode_uastc_c3(allocator, images, w, h, type, opts);
+	return encode_ffi(allocator, fmt, images, w, h, type, opts);
+}
+
+<* The original basisu FFI encode path (both formats). *>
+fn char[]? encode_ffi(Allocator allocator, uint fmt, char[][] images, uint w, uint h, TexType type, EncodeOptions opts)
 {
 	init();
 	if (!images.len) return ENCODE_FAILED~;
@@ -137,6 +148,106 @@ fn char[]? encode(Allocator allocator, uint fmt, char[][] images, uint w, uint h
 	mem::copy(buf, (void*)(uptr)ofs, (sz)size);
 	bu_delete_comp_params(p);
 	return buf[:size];
+}
+
+<*
+ Pure-C3 UASTC KTX2 encode: per-image mip chains via ktx::mipgen, blocks via
+ ktx::uastc, Zstd-supercompressed levels via ktx::container. Matches the
+ basisu KTX2 output shape: vkFormat 0, typeSize 1, UASTC DFD (model 166).
+ `opts.effort` maps to the basisu pack level like the wasm API does
+ (round(effort/10*4)); `opts.quality` is accepted but unused (it only tunes
+ RDO, which the C3 encoder doesn't do yet).
+*>
+fn char[]? encode_uastc_c3(Allocator allocator, char[][] images, uint w, uint h, TexType type, EncodeOptions opts) @local => @pool()
+{
+	if (!images.len) return ENCODE_FAILED~;
+	if (type == TexType.CUBE && (images.len != 6 || w != h)) return ENCODE_FAILED~;
+	foreach (img : images)
+	{
+		if (img.len != (usz)w * h * 4) return ENCODE_FAILED~;
+	}
+	uint pack_level = ((uint)opts.effort * 4 + 5) / 10;   // round(effort/10*4), like the wasm API
+
+	bool has_alpha;
+	foreach (img : images)
+	{
+		for (usz i = 3; i < img.len; i += 4)
+		{
+			if (img[i] != 255)
+			{
+				has_alpha = true;
+				break;
+			}
+		}
+		if (has_alpha) break;
+	}
+
+	uint levels = opts.mipmaps ? mipgen::chain_length(w, h) : 1;
+
+	container::Texture tex = {
+		.vk_format = 0,   // VK_FORMAT_UNDEFINED, as required for UASTC + supercompression
+		.type_size = 1,
+		.width = w,
+		.height = h,
+		.layer_count = type == TexType.ARRAY ? (uint)images.len : 0,
+		.face_count = type == TexType.CUBE ? 6 : 1,
+		.dfd = uastc_dfd(tmem, opts.srgb, has_alpha),
+		.allocator = tmem,
+	};
+	tex.levels = alloc::new_array(tmem, char[], levels);
+
+	// Blocks per level, all images of a level concatenated (layer-major, then
+	// face — same as the KTX2 level layout).
+	uint image_count = (uint)images.len;
+	for (uint l = 0; l < levels; ++l)
+	{
+		uint lw = max(w >> l, 1u);
+		uint lh = max(h >> l, 1u);
+		usz img_blocks = (usz)((lw + 3) / 4) * (usz)((lh + 3) / 4) * 16;
+		tex.levels[l] = alloc::new_array(tmem, char, (sz)(img_blocks * image_count));
+	}
+	foreach (idx, img : images)
+	{
+		char[] mip = img;
+		uint lw = w;
+		uint lh = h;
+		for (uint l = 0; l < levels; ++l)
+		{
+			if (l > 0)
+			{
+				mip = mipgen::next_level(tmem, mip, lw, lh, { .srgb = opts.srgb });
+				lw = max(lw >> 1, 1u);
+				lh = max(lh >> 1, 1u);
+			}
+			char[] blocks = uastc::encode_image(tmem, mip, lw, lh, pack_level) ?? ENCODE_FAILED~!;
+			usz img_blocks = blocks.len;
+			tex.levels[l][(usz)idx * img_blocks : img_blocks] = blocks[..];
+		}
+	}
+
+	return container::write(allocator, &tex, { .scheme = container::Scheme.ZSTD });
+}
+
+<*
+ Canonical DFD bytes for a UASTC KTX2, byte-identical to what basisu's KTX2
+ writer produces: model 166, BT709 primaries, 4x4 blocks, bytesPlane0 16, one
+ 128-bit sample with channel 0 (RGB) or 3 (RGBA).
+*>
+fn char[] uastc_dfd(Allocator allocator, bool srgb, bool alpha) @local
+{
+	char[] d = alloc::new_array(allocator, char, 44);
+	util::wr32(d, 0, 44);                    // dfdTotalSize
+	util::wr32(d, 8, 2 | (40 << 16));        // versionNumber 2, descriptorBlockSize 40
+	d[12] = (char)dfd::MODEL_UASTC;
+	d[13] = (char)dfd::PRIMARIES_BT709;
+	d[14] = (char)(srgb ? dfd::TRANSFER_SRGB : dfd::TRANSFER_LINEAR);
+	d[16] = 3;                               // texelBlockDimension0 (4-1)
+	d[17] = 3;
+	d[20] = 16;                              // bytesPlane0
+	d[30] = 127;                             // sample bitLength (128-1)
+	d[31] = alpha ? 3 : 0;                   // channelType: RGBA / RGB
+	util::wr32(d, 40, 0xFFFF_FFFF);          // sampleUpper
+	return d;
 }
 
 <*

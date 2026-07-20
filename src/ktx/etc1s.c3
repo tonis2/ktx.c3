@@ -352,7 +352,7 @@ fn void? Codebook.decode_slice(&self, char[] slice_data, uint width, uint height
 // Reconstruct one block's pixels into the raster-order RGBA output, cropped
 // at the image edges.
 fn void Codebook.write_block(&self, char[] out, uint width, uint height, uint bx, uint by,
-	uint endpoint_index, uint selector_index, Pass pass) @local
+	uint endpoint_index, uint selector_index, Pass pass)
 {
 	Endpoint* ep = &self.endpoints[endpoint_index];
 	Selector* sel = &self.selectors[selector_index];

@@ -7,7 +7,7 @@
 // dual-plane fields, BISE-packed endpoints, then plain-bit weights filling the
 // block to bit 128.
 module ktx::uastc;
-import ktx::bits;
+import ktx::bits, ktx::etc1s;
 
 faultdef INVALID_BLOCK, INVALID_SIZE;
 
@@ -504,4 +504,883 @@ fn void? decode_image(char[] blocks, char[] out, uint width, uint height, bool s
 			}
 		}
 	}
+}
+
+// ===========================================================================
+// Encode (docs/basis-rewrite.md phase 4)
+//
+// Starter mode set = basisu's cPackUASTCLevelFaster list: solid (mode 8) plus
+// modes 0/4/6 for RGB, 9/11/12 for RGBA, 15/17 for luminance+alpha; level 0
+// restricts to the Fastest subset. Each candidate mode gets a trial encode
+// (bbox-diagonal projection + least-squares endpoint refinement, then exact
+// reconstruction through the decoder's own unquant/interpolate math to pick
+// weights and score MSE); the lowest-error trial is serialized with the same
+// bit layout as basisu's pack_uastc. Transcode hint bits are written as
+// zeros — a quality-only tradeoff for ETC1/EAC transcode targets — except on
+// solid blocks, where the ETC1 hint is authoritative and computed properly.
+// ===========================================================================
+
+// Mode Huffman codes for writing, LSB-first (g_uastc_mode_huff_codes[.][0];
+// bit lengths in MODE_CODE_SIZES).
+const char[TOTAL_MODES + 1] MODE_CODES = {
+	0x1, 0x35, 0x1D, 0x3, 0x13, 0xB, 0x1B, 0x7, 0x17, 0xF,
+	0x2, 0x0, 0x6, 0x1F, 0xD, 0x5, 0x15, 0x25, 0x9, 0x45,
+};
+
+// Per-range endpoint quantization: the packed BISE value (bits | digit<<bits)
+// whose unquantized byte is nearest each desired byte. Built on first use;
+// init is not thread-safe (call encode once before going parallel).
+char[256][21] quant_lut @local;
+bool quant_ready @local = false;
+
+fn void init_quant() @local
+{
+	if (quant_ready) return;
+	for (uint range = 0; range < 21; range++)
+	{
+		uint nbits = BISE_RANGE[range][0];
+		uint digits = 1;
+		if (BISE_RANGE[range][1] != 0) digits = 3;
+		if (BISE_RANGE[range][2] != 0) digits = 5;
+		// Trit/quint ranges without unquant params never appear as endpoint
+		// ranges (no mode uses them) — skip instead of tripping on them.
+		if (digits > 1 && UNQUANT_B[range].len == 0) continue;
+		for (uint want = 0; want < 256; want++)
+		{
+			uint best;
+			int best_err = 256;
+			for (uint d = 0; d < digits; d++)
+			{
+				for (uint b = 0; b < (1u << nbits); b++)
+				{
+					uint packed = b | (d << nbits);
+					int err = (int)unquant_endpoint(packed, range) - (int)want;
+					if (err < 0) err = -err;
+					if (err < best_err)
+					{
+						best_err = err;
+						best = packed;
+					}
+				}
+			}
+			quant_lut[range][want] = (char)best;
+		}
+	}
+	quant_ready = true;
+}
+
+struct Trial @local
+{
+	uint mode;
+	uint pattern;   // common-pattern index (2/3-subset modes)
+	int ccs;        // second-plane component (dual-plane modes), else -1
+	ulong err;
+	char[18] endpoints;   // packed BISE values, [subset*comps*2 + comp*2 + lo/hi]
+	char[32] weights;     // weight indices, [texel*planes + plane]
+}
+
+fn void put_bits(char[] buf, uint* ofs, uint val, uint n) @local
+{
+	for (uint i = 0; i < n; i++)
+	{
+		if ((val >> i) & 1) buf[(*ofs + i) >> 3] |= (char)(1u << ((*ofs + i) & 7));
+	}
+	*ofs += n;
+}
+
+<* Partition pattern + per-subset anchor texels (16 = no anchor sentinel). *>
+fn void pattern_anchors(uint mode, uint subsets, uint idx, char[16]* pattern, uint[3]* anchors) @local
+{
+	(*anchors)[0] = 0;
+	(*anchors)[1] = 16;
+	(*anchors)[2] = 16;
+	switch (subsets)
+	{
+		case 3:
+			(*pattern)[..] = PATTERNS3[idx * 16 : 16];
+			(*anchors)[0] = ANCHORS3[idx * 3];
+			(*anchors)[1] = ANCHORS3[idx * 3 + 1];
+			(*anchors)[2] = ANCHORS3[idx * 3 + 2];
+		case 2:
+			if (mode == 7)
+			{
+				(*pattern)[..] = PATTERNS2_3[idx * 16 : 16];
+				(*anchors)[0] = ANCHORS2_3[idx * 2];
+				(*anchors)[1] = ANCHORS2_3[idx * 2 + 1];
+			}
+			else
+			{
+				(*pattern)[..] = PATTERNS2[idx * 16 : 16];
+				(*anchors)[0] = ANCHORS2[idx * 2];
+				(*anchors)[1] = ANCHORS2[idx * 2 + 1];
+			}
+		default:
+			*pattern = {};
+	}
+}
+
+fn float clamp255(float v) @local @inline => v < 0 ? 0 : v > 255 ? 255 : v;
+
+<*
+ Fit float low/high endpoints for one subset's texels over the given pixel
+ channels: bbox-diagonal projection for initial weights, then least-squares
+ refinement with reassignment. Results are indexed by position in `chans`.
+*>
+fn void fit_endpoints(char[] px, uint[] texels, char[] chans, uint wbits, float[4]* flo, float[4]* fhi) @local
+{
+	uint nch = (uint)chans.len;
+	uint levels = 1u << wbits;
+
+	float[4] lo = { 255, 255, 255, 255 };
+	float[4] hi;
+	foreach (t : texels)
+	{
+		for (uint c = 0; c < nch; c++)
+		{
+			float v = (float)px[t * 4 + chans[c]];
+			if (v < lo[c]) lo[c] = v;
+			if (v > hi[c]) hi[c] = v;
+		}
+	}
+	float[4] axis;
+	float len2;
+	for (uint c = 0; c < nch; c++)
+	{
+		axis[c] = hi[c] - lo[c];
+		len2 += axis[c] * axis[c];
+	}
+	*flo = lo;
+	*fhi = hi;
+	if (len2 < 0.0001f) return;   // constant subset
+
+	// Initial weight fractions: project on the diagonal, snap to the mode's
+	// representable fractions.
+	float[16] fw;
+	foreach (idx, t : texels)
+	{
+		float dot;
+		for (uint c = 0; c < nch; c++)
+		{
+			dot += ((float)px[t * 4 + chans[c]] - lo[c]) * axis[c];
+		}
+		float tt = dot / len2;
+		if (tt < 0) tt = 0;
+		if (tt > 1) tt = 1;
+		uint bl;
+		float bd = 2;
+		for (uint l = 0; l < levels; l++)
+		{
+			float f = (float)weight_scale(l, wbits) / 64.0f;
+			float d = f > tt ? f - tt : tt - f;
+			if (d < bd)
+			{
+				bd = d;
+				bl = l;
+			}
+		}
+		fw[idx] = (float)weight_scale(bl, wbits) / 64.0f;
+	}
+
+	float[4] cur_lo = lo;
+	float[4] cur_hi = hi;
+	for (uint pass = 0; pass < 2; pass++)
+	{
+		float z00;
+		float z01;
+		float z11;
+		float[4] q0;
+		float[4] q1;
+		foreach (idx, t : texels)
+		{
+			float f = fw[idx];
+			float omf = 1.0f - f;
+			z00 += omf * omf;
+			z01 += omf * f;
+			z11 += f * f;
+			for (uint c = 0; c < nch; c++)
+			{
+				float v = (float)px[t * 4 + chans[c]];
+				q0[c] += omf * v;
+				q1[c] += f * v;
+			}
+		}
+		float det = z00 * z11 - z01 * z01;
+		if (det > 1e-8f || det < -1e-8f)
+		{
+			for (uint c = 0; c < nch; c++)
+			{
+				cur_lo[c] = clamp255((z11 * q0[c] - z01 * q1[c]) / det);
+				cur_hi[c] = clamp255((z00 * q1[c] - z01 * q0[c]) / det);
+			}
+		}
+		if (pass == 1) break;   // final selection happens in exact reconstruction
+
+		foreach (idx, t : texels)
+		{
+			float bd = 1e30f;
+			float bf;
+			for (uint l = 0; l < levels; l++)
+			{
+				float f = (float)weight_scale(l, wbits) / 64.0f;
+				float e;
+				for (uint c = 0; c < nch; c++)
+				{
+					float d = cur_lo[c] + (cur_hi[c] - cur_lo[c]) * f - (float)px[t * 4 + chans[c]];
+					e += d * d;
+				}
+				if (e < bd)
+				{
+					bd = e;
+					bf = f;
+				}
+			}
+			fw[idx] = bf;
+		}
+	}
+	*flo = cur_lo;
+	*fhi = cur_hi;
+}
+
+<*
+ Exact reconstruction of a trial through the decoder's unquant/interpolate
+ math: picks the best weight index per texel (per plane) and returns the total
+ squared RGBA error against the source pixels.
+*>
+fn ulong reconstruct(uint mode, char[16]* pattern, int ccs, char[18]* endpoints, char[32]* weights, char[] px) @local
+{
+	uint subsets = MODE_SUBSETS[mode];
+	uint comps = MODE_COMPS[mode];
+	uint range = MODE_ENDPOINT_RANGES[mode];
+	uint wbits = MODE_WEIGHT_BITS[mode];
+	uint planes = MODE_PLANES[mode];
+	uint levels = 1u << wbits;
+
+	char[4][2][3] ep;
+	for (uint s = 0; s < subsets; s++)
+	{
+		if (comps == 2)
+		{
+			char ll = (char)unquant_endpoint((*endpoints)[s * 4 + 0], range);
+			char lh = (char)unquant_endpoint((*endpoints)[s * 4 + 1], range);
+			char al = (char)unquant_endpoint((*endpoints)[s * 4 + 2], range);
+			char ah = (char)unquant_endpoint((*endpoints)[s * 4 + 3], range);
+			ep[s][0] = { ll, ll, ll, al };
+			ep[s][1] = { lh, lh, lh, ah };
+		}
+		else
+		{
+			for (uint c = 0; c < comps; c++)
+			{
+				ep[s][0][c] = (char)unquant_endpoint((*endpoints)[s * comps * 2 + c * 2 + 0], range);
+				ep[s][1][c] = (char)unquant_endpoint((*endpoints)[s * comps * 2 + c * 2 + 1], range);
+			}
+			for (uint c = comps; c < 4; c++)
+			{
+				ep[s][0][c] = 255;
+				ep[s][1][c] = 255;
+			}
+		}
+	}
+
+	char[4][32][3] colors;
+	for (uint s = 0; s < subsets; s++)
+	{
+		for (uint l = 0; l < levels; l++)
+		{
+			uint w = weight_scale(l, wbits);
+			for (uint c = 0; c < 4; c++)
+			{
+				colors[s][l][c] = interpolate(ep[s][0][c], ep[s][1][c], w, false);
+			}
+		}
+	}
+
+	ulong total;
+	if (planes == 1)
+	{
+		for (uint i = 0; i < 16; i++)
+		{
+			uint s = (*pattern)[i];
+			uint best = 0xFFFF_FFFF;
+			uint bw;
+			for (uint l = 0; l < levels; l++)
+			{
+				uint e;
+				for (uint c = 0; c < 4; c++)
+				{
+					int d = (int)colors[s][l][c] - (int)px[i * 4 + c];
+					e += (uint)(d * d);
+				}
+				if (e < best)
+				{
+					best = e;
+					bw = l;
+				}
+			}
+			(*weights)[i] = (char)bw;
+			total += best;
+		}
+	}
+	else
+	{
+		for (uint i = 0; i < 16; i++)
+		{
+			for (uint p = 0; p < 2; p++)
+			{
+				uint best = 0xFFFF_FFFF;
+				uint bw;
+				for (uint l = 0; l < levels; l++)
+				{
+					uint e;
+					for (uint c = 0; c < 4; c++)
+					{
+						if (((int)c == ccs ? 1u : 0u) != p) continue;
+						int d = (int)colors[0][l][c] - (int)px[i * 4 + c];
+						e += (uint)(d * d);
+					}
+					if (e < best)
+					{
+						best = e;
+						bw = l;
+					}
+				}
+				(*weights)[i * 2 + p] = (char)bw;
+				total += best;
+			}
+		}
+	}
+	return total;
+}
+
+<* Trial-encode one candidate (mode, pattern, ccs) against the block. *>
+fn Trial trial_mode(uint mode, uint pattern_idx, int ccs, char[] px) @local
+{
+	uint subsets = MODE_SUBSETS[mode];
+	uint comps = MODE_COMPS[mode];
+	uint range = MODE_ENDPOINT_RANGES[mode];
+	uint wbits = MODE_WEIGHT_BITS[mode];
+	uint planes = MODE_PLANES[mode];
+
+	char[16] pattern;
+	uint[3] anchors;
+	pattern_anchors(mode, subsets, pattern_idx, &pattern, &anchors);
+
+	char[4] chans;
+	switch (comps)
+	{
+		case 2:
+			chans[0] = 0;
+			chans[1] = 3;
+		default:
+			for (uint c = 0; c < comps; c++) chans[c] = (char)c;
+	}
+
+	Trial t = { .mode = mode, .pattern = pattern_idx, .ccs = ccs };
+
+	for (uint s = 0; s < subsets; s++)
+	{
+		uint[16] texels;
+		uint ntex;
+		for (uint i = 0; i < 16; i++)
+		{
+			if (pattern[i] == s) texels[ntex++] = i;
+		}
+
+		float[4] mlo;
+		float[4] mhi;
+		if (planes == 1)
+		{
+			fit_endpoints(px, texels[:ntex], chans[:comps], wbits, &mlo, &mhi);
+		}
+		else
+		{
+			// Plane 1 drives the ccs channel alone; plane 0 fits the rest.
+			uint ccs_chan = comps == 2 ? 3u : (uint)ccs;
+			char[4] c0;
+			uint n0;
+			for (uint c = 0; c < comps; c++)
+			{
+				if (chans[c] != (char)ccs_chan) c0[n0++] = chans[c];
+			}
+			char[1] c1 = { (char)ccs_chan };
+			float[4] plo;
+			float[4] phi;
+			float[4] slo;
+			float[4] shi;
+			fit_endpoints(px, texels[:ntex], c0[:n0], wbits, &plo, &phi);
+			fit_endpoints(px, texels[:ntex], c1[..], wbits, &slo, &shi);
+			uint k;
+			for (uint c = 0; c < comps; c++)
+			{
+				if (chans[c] == (char)ccs_chan)
+				{
+					mlo[c] = slo[0];
+					mhi[c] = shi[0];
+				}
+				else
+				{
+					mlo[c] = plo[k];
+					mhi[c] = phi[k];
+					k++;
+				}
+			}
+		}
+
+		for (uint c = 0; c < comps; c++)
+		{
+			t.endpoints[s * comps * 2 + c * 2 + 0] = quant_lut[range][(uint)(mlo[c] + 0.5f)];
+			t.endpoints[s * comps * 2 + c * 2 + 1] = quant_lut[range][(uint)(mhi[c] + 0.5f)];
+		}
+	}
+
+	t.err = reconstruct(mode, &pattern, ccs, &t.endpoints, &t.weights, px);
+	return t;
+}
+
+<*
+ Rank the 30 shared 2-subset patterns by a cheap projection error over the
+ first `nch` RGBA channels; returns the best two candidates for full trials.
+*>
+fn void rank_patterns2(char[] px, uint nch, uint* best0, uint* best1) @local
+{
+	float e0 = 1e30f;
+	float e1 = 1e30f;
+	*best0 = 0;
+	*best1 = 0;
+	for (uint p = 0; p < TOTAL_PATTERNS2; p++)
+	{
+		float err;
+		for (uint s = 0; s < 2; s++)
+		{
+			float[4] lo = { 255, 255, 255, 255 };
+			float[4] hi;
+			for (uint i = 0; i < 16; i++)
+			{
+				if (PATTERNS2[p * 16 + i] != s) continue;
+				for (uint c = 0; c < nch; c++)
+				{
+					float v = (float)px[i * 4 + c];
+					if (v < lo[c]) lo[c] = v;
+					if (v > hi[c]) hi[c] = v;
+				}
+			}
+			float[4] axis;
+			float len2;
+			for (uint c = 0; c < nch; c++)
+			{
+				axis[c] = hi[c] - lo[c];
+				len2 += axis[c] * axis[c];
+			}
+			if (len2 < 0.0001f) continue;
+			for (uint i = 0; i < 16; i++)
+			{
+				if (PATTERNS2[p * 16 + i] != s) continue;
+				float dot;
+				for (uint c = 0; c < nch; c++)
+				{
+					dot += ((float)px[i * 4 + c] - lo[c]) * axis[c];
+				}
+				float tt = dot / len2;
+				if (tt < 0) tt = 0;
+				if (tt > 1) tt = 1;
+				for (uint c = 0; c < nch; c++)
+				{
+					float d = lo[c] + tt * axis[c] - (float)px[i * 4 + c];
+					err += d * d;
+				}
+			}
+		}
+		if (err < e0)
+		{
+			e1 = e0;
+			*best1 = *best0;
+			e0 = err;
+			*best0 = p;
+		}
+		else if (err < e1)
+		{
+			e1 = err;
+			*best1 = p;
+		}
+	}
+}
+
+fn uint argmax_variance_rgb(char[] px) @local
+{
+	float[3] sum;
+	float[3] sum2;
+	for (uint i = 0; i < 16; i++)
+	{
+		for (uint c = 0; c < 3; c++)
+		{
+			float v = (float)px[i * 4 + c];
+			sum[c] += v;
+			sum2[c] += v * v;
+		}
+	}
+	uint best;
+	float bv = -1;
+	for (uint c = 0; c < 3; c++)
+	{
+		float variance = sum2[c] - sum[c] * sum[c] / 16.0f;
+		if (variance > bv)
+		{
+			bv = variance;
+			best = c;
+		}
+	}
+	return best;
+}
+
+fn int etc1_solid_val(bool diff, uint inten, uint sel, uint base) @local
+{
+	int c = diff ? (int)((base >> 2) | (base << 3)) : (int)(base | (base << 4));
+	c += etc1s::INTEN_TABLES[inten][sel];
+	return c < 0 ? 0 : c > 255 ? 255 : c;
+}
+
+<*
+ Pack a solid-color block: mode 8 + RGBA + the ETC1 hint. Unlike the other
+ modes' hints, the solid ETC1 hint is authoritative (transcoders rebuild the
+ ETC1 block straight from it), so search the (diff, inten, selector, base)
+ space for the config that reproduces the color best.
+*>
+fn void pack_solid(char[] px4, char[] out) @local
+{
+	char[16] buf;
+	uint ofs;
+	put_bits(buf[..], &ofs, MODE_CODES[MODE_SOLID], MODE_CODE_SIZES[MODE_SOLID]);
+	for (uint c = 0; c < 4; c++) put_bits(buf[..], &ofs, px4[c], 8);
+
+	uint best_err = 0xFFFF_FFFF;
+	uint bd;
+	uint bi;
+	uint bs;
+	uint[3] bbase;
+	for (uint diff = 0; diff < 2; diff++)
+	{
+		uint limit = diff != 0 ? 32u : 16u;
+		for (uint inten = 0; inten < 8; inten++)
+		{
+			for (uint sel = 0; sel < 4; sel++)
+			{
+				uint err;
+				uint[3] base;
+				for (uint c = 0; c < 3; c++)
+				{
+					uint bc;
+					uint bce = 0xFFFF_FFFF;
+					for (uint b = 0; b < limit; b++)
+					{
+						int d = etc1_solid_val(diff != 0, inten, sel, b) - (int)px4[c];
+						uint e = (uint)(d * d);
+						if (e < bce)
+						{
+							bce = e;
+							bc = b;
+						}
+					}
+					base[c] = bc;
+					err += bce;
+				}
+				if (err < best_err)
+				{
+					best_err = err;
+					bd = diff;
+					bi = inten;
+					bs = sel;
+					bbase = base;
+				}
+			}
+		}
+	}
+	put_bits(buf[..], &ofs, bd, 1);
+	put_bits(buf[..], &ofs, bi, 3);
+	put_bits(buf[..], &ofs, bs, 2);
+	put_bits(buf[..], &ofs, bbase[0], 5);
+	put_bits(buf[..], &ofs, bbase[1], 5);
+	put_bits(buf[..], &ofs, bbase[2], 5);
+	out[..] = buf[..];
+}
+
+<* Serialize a trial with pack_uastc's exact bit layout. *>
+fn void pack_block(Trial* t, char[] out) @local
+{
+	char[16] buf;
+	uint ofs;
+	uint mode = t.mode;
+	uint subsets = MODE_SUBSETS[mode];
+	uint comps = MODE_COMPS[mode];
+	uint planes = MODE_PLANES[mode];
+	uint wbits = MODE_WEIGHT_BITS[mode];
+
+	put_bits(buf[..], &ofs, MODE_CODES[mode], MODE_CODE_SIZES[mode]);
+
+	// Hints: zeros, except the trailing 8-bit ETC2 EAC table/multiplier field
+	// of the alpha-carrying modes, where basisu asserts multiplier >= 1.
+	uint hint_bits = MODE_HINT_BITS[mode];
+	if (comps != 3)
+	{
+		put_bits(buf[..], &ofs, 0, hint_bits - 8);
+		put_bits(buf[..], &ofs, 1u << 4, 8);
+	}
+	else
+	{
+		put_bits(buf[..], &ofs, 0, hint_bits);
+	}
+
+	switch (mode)
+	{
+		case 2:
+		case 4:
+		case 7:
+		case 9:
+		case 16:
+			put_bits(buf[..], &ofs, t.pattern, 5);
+		case 3:
+			put_bits(buf[..], &ofs, t.pattern, 4);
+		default:
+			break;
+	}
+	switch (mode)
+	{
+		case 6:
+		case 11:
+		case 13:
+			put_bits(buf[..], &ofs, (uint)t.ccs, 2);
+		default:
+			break;
+	}
+
+	char[16] pattern;
+	uint[3] anchors;
+	pattern_anchors(mode, subsets, t.pattern, &pattern, &anchors);
+	char[18] endpoints = t.endpoints;
+	char[32] weights = t.weights;
+	uint maxw = (1u << wbits) - 1;
+
+	// If an anchor weight's MSB is set, invert that subset's weights in that
+	// plane and swap the affected endpoint pairs — the anchor is stored with
+	// one less bit, so its MSB must be clear.
+	for (uint plane = 0; plane < planes; plane++)
+	{
+		for (uint s = 0; s < subsets; s++)
+		{
+			if (((uint)weights[anchors[s] * planes + plane] >> (wbits - 1)) & 1)
+			{
+				for (uint i = 0; i < 16; i++)
+				{
+					if (pattern[i] == s) weights[i * planes + plane] = (char)(maxw - weights[i * planes + plane]);
+				}
+				if (planes == 2)
+				{
+					for (uint c = 0; c < comps; c++)
+					{
+						uint comp_plane = comps == 2 ? c : ((int)c == t.ccs ? 1u : 0u);
+						if (comp_plane == plane)
+						{
+							char tmp = endpoints[c * 2];
+							endpoints[c * 2] = endpoints[c * 2 + 1];
+							endpoints[c * 2 + 1] = tmp;
+						}
+					}
+				}
+				else
+				{
+					for (uint c = 0; c < comps; c++)
+					{
+						char tmp = endpoints[s * comps * 2 + c * 2];
+						endpoints[s * comps * 2 + c * 2] = endpoints[s * comps * 2 + c * 2 + 1];
+						endpoints[s * comps * 2 + c * 2 + 1] = tmp;
+					}
+				}
+			}
+		}
+	}
+
+	// Endpoints: trit/quint digits first, bundled little-endian base-3/5 (the
+	// last bundle only carries the digits actually used), then the plain bits.
+	uint range = MODE_ENDPOINT_RANGES[mode];
+	uint ep_bits = BISE_RANGE[range][0];
+	bool trits = BISE_RANGE[range][1] != 0;
+	bool quints = BISE_RANGE[range][2] != 0;
+	uint total_values = comps * 2 * subsets;
+
+	if (trits || quints)
+	{
+		uint mul = trits ? 3u : 5u;
+		uint flush = trits ? 243u : 125u;
+		uint accum;
+		uint accum_mul = 1;
+		for (uint i = 0; i < total_values; i++)
+		{
+			accum += ((uint)endpoints[i] >> ep_bits) * accum_mul;
+			accum_mul *= mul;
+			if (accum_mul == flush)
+			{
+				put_bits(buf[..], &ofs, accum, trits ? 8 : 7);
+				accum = 0;
+				accum_mul = 1;
+			}
+		}
+		if (accum_mul > 1)
+		{
+			uint nb;
+			if (trits)
+			{
+				switch (accum_mul)
+				{
+					case 3: nb = 2;
+					case 9: nb = 4;
+					case 27: nb = 5;
+					default: nb = 7;
+				}
+			}
+			else
+			{
+				nb = accum_mul == 5 ? 3 : 5;
+			}
+			put_bits(buf[..], &ofs, accum, nb);
+		}
+	}
+	for (uint i = 0; i < total_values; i++)
+	{
+		put_bits(buf[..], &ofs, (uint)endpoints[i] & ((1u << ep_bits) - 1), ep_bits);
+	}
+
+	// Weights; anchors get one bit less.
+	uint plane_shift = planes == 2 ? 1u : 0u;
+	for (uint i = 0; i < 16 * planes; i++)
+	{
+		uint texel = i >> plane_shift;
+		uint nb = wbits;
+		for (uint s = 0; s < subsets; s++)
+		{
+			if (anchors[s] == texel)
+			{
+				nb = wbits - 1;
+				break;
+			}
+		}
+		put_bits(buf[..], &ofs, weights[i], nb);
+	}
+	assert(ofs <= 128);
+	out[..] = buf[..];
+}
+
+fn void consider(Trial* best, Trial t) @local
+{
+	if (t.err < best.err) *best = t;
+}
+
+<*
+ Encode one 4x4 RGBA8 block (64 bytes, row-major) into a 16-byte UASTC block.
+ `level` is the basisu pack level: 0 tries basisu's Fastest mode set, >= 1
+ also the 2-subset and dual-plane RGB modes (the Faster set).
+*>
+fn void encode_block(char[] px, char[] out, uint level = 1)
+{
+	assert(px.len == 64 && out.len == 16);
+	init_quant();
+
+	bool solid = true;
+	bool has_alpha = false;
+	bool gray = true;
+	for (uint i = 0; i < 16; i++)
+	{
+		if (px[i * 4] != px[0] || px[i * 4 + 1] != px[1] || px[i * 4 + 2] != px[2] || px[i * 4 + 3] != px[3]) solid = false;
+		if (px[i * 4 + 3] != 255) has_alpha = true;
+		if (px[i * 4] != px[i * 4 + 1] || px[i * 4] != px[i * 4 + 2]) gray = false;
+	}
+	if (solid)
+	{
+		pack_solid(px[:4], out);
+		assert(packed_err(out, px) == 0, "solid block must decode exactly");
+		return;
+	}
+
+	Trial best;
+	best.err = ~(ulong)0;
+	if (!has_alpha)
+	{
+		consider(&best, trial_mode(0, 0, -1, px));
+		if (level >= 1)
+		{
+			consider(&best, trial_mode(6, 0, (int)argmax_variance_rgb(px), px));
+			uint p0;
+			uint p1;
+			rank_patterns2(px, 3, &p0, &p1);
+			consider(&best, trial_mode(4, p0, -1, px));
+			if (p1 != p0) consider(&best, trial_mode(4, p1, -1, px));
+		}
+	}
+	else
+	{
+		consider(&best, trial_mode(12, 0, -1, px));
+		consider(&best, trial_mode(11, 0, 3, px));
+		if (level >= 1)
+		{
+			uint p0;
+			uint p1;
+			rank_patterns2(px, 4, &p0, &p1);
+			consider(&best, trial_mode(9, p0, -1, px));
+			if (p1 != p0) consider(&best, trial_mode(9, p1, -1, px));
+		}
+	}
+	if (gray && (has_alpha || level >= 1))
+	{
+		consider(&best, trial_mode(15, 0, -1, px));
+		if (level >= 1) consider(&best, trial_mode(17, 0, 3, px));
+	}
+	pack_block(&best, out);
+	assert(packed_err(out, px) == best.err,
+		"pack/decode mismatch: mode %d packed err %d, trial err %d",
+		best.mode, packed_err(out, px), best.err);
+}
+
+<* Squared RGBA error of a packed block against source pixels (assert helper). *>
+fn ulong packed_err(char[] blk, char[] px) @local
+{
+	char[64] back;
+	if (@catch(decode_block(blk, back[..]))) return ~(ulong)0;
+	ulong e;
+	for (uint i = 0; i < 64; i++)
+	{
+		int d = (int)back[i] - (int)px[i];
+		e += (ulong)(d * d);
+	}
+	return e;
+}
+
+<*
+ Encode an image to UASTC blocks: `rgba` is width*height*4 bytes, the result
+ is ceil(w/4)*ceil(h/4) 16-byte blocks in raster order (a KTX2 level image,
+ before supercompression). Edge blocks pad by clamping.
+*>
+fn char[]? encode_image(Allocator allocator, char[] rgba, uint width, uint height, uint level = 1)
+{
+	if (rgba.len != (usz)width * height * 4) return INVALID_SIZE~;
+	uint bw = (width + 3) / 4;
+	uint bh = (height + 3) / 4;
+	char[] out = alloc::new_array(allocator, char, (sz)((usz)bw * bh * 16));
+
+	char[64] px;
+	for (uint by = 0; by < bh; by++)
+	{
+		for (uint bx = 0; bx < bw; bx++)
+		{
+			for (uint y = 0; y < 4; y++)
+			{
+				uint sy = min(by * 4 + y, height - 1);
+				for (uint x = 0; x < 4; x++)
+				{
+					uint sx = min(bx * 4 + x, width - 1);
+					usz src = ((usz)sy * width + sx) * 4;
+					px[(y * 4 + x) * 4 : 4] = rgba[src : 4];
+				}
+			}
+			encode_block(px[..], out[((usz)by * bw + bx) * 16 : 16], level);
+		}
+	}
+	return out;
 }

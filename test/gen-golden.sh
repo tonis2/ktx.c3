@@ -5,9 +5,9 @@
 # level's RGBA32 transcode next to the .ktx2 as <name>.l<level>.bin. Later
 # phases diff the C3 decoders bit-exactly against these dumps.
 #
-# The dumps are taken with `extract --ffi` so the oracle is ALWAYS the basisu
-# transcoder, even after `basis::transcode` starts routing through the C3
-# decoders.
+# The dumps are taken with `extract --ffi` and files are encoded with
+# `create --ffi` so the oracle is ALWAYS basisu, even after `basis::transcode`
+# and `basis::encode` start routing through the C3 codec.
 #
 # Output lands in test/golden/ (gitignored) — a local artifact, regenerated
 # any time with this script while basisu is still linked.
@@ -36,11 +36,17 @@ for img in gradient detail alpha gray normal; do
 		normal) fmts="etc1s-linear uastc-linear" ;;
 		*)      fmts="etc1s uastc" ;;
 	esac
+
+	# Raw source pixels, so encoder tests can score PSNR against the true
+	# source (the test binary has no PNG decoder).
+	$KTX create -f rgba8-srgb --raw -o test/golden/tmp-src.ktx2 "test/images/$img.png" > /dev/null
+	$KTX extract --raw -o "test/golden/$img.src.bin" test/golden/tmp-src.ktx2 > /dev/null
+	rm -f test/golden/tmp-src.ktx2
 	for fmt in $fmts; do
 		for q in 10 50 90; do
 			for mip in nomip mip; do
 				base="test/golden/$img-$fmt-q$q-$mip"
-				set -- -f "$fmt" --quality "$q" -o "$base.ktx2" "test/images/$img.png"
+				set -- --ffi -f "$fmt" --quality "$q" -o "$base.ktx2" "test/images/$img.png"
 				[ "$mip" = mip ] && set -- -m "$@"
 				$KTX create "$@" > /dev/null
 				dump_levels "$base"

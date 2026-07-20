@@ -20,6 +20,8 @@ options:
       --quality <0-100> etc1s/uastc encode quality (default 90)
       --effort <0-10>   etc1s/uastc encode effort (default 2)
       --zstd <level>    Zstd supercompression level 1..22 (default: 3)
+      --ffi             force the bundled basisu encoder for etc1s/uastc
+                        (test oracle integrity; default uses the C3 encoder)
       --zlib            ZLIB supercompression instead of Zstd
       --raw             no supercompression
   -o, --output <path>   output file (required)
@@ -34,6 +36,7 @@ fn int cmd_create(String[] args)
 	bool cube;
 	bool zlib_flag;
 	bool raw_flag;
+	bool ffi_flag;
 	int zstd_level = 0;
 	int quality = 90;
 	int effort = 2;
@@ -48,6 +51,7 @@ fn int cmd_create(String[] args)
 		null, "zstd", &zstd_level,
 		null, "zlib", &zlib_flag,
 		null, "raw", &raw_flag,
+		null, "ffi", &ffi_flag,
 		"o", "output", &output,
 		"h*", "help", null);
 	if (catch err = end)
@@ -85,7 +89,7 @@ fn int cmd_create(String[] args)
 			? basis::TexType.CUBE
 			: (inputs.len > 1 ? basis::TexType.ARRAY : basis::TexType.D2);
 		basis::EncodeOptions opts = { .quality = quality, .effort = effort, .srgb = bsrgb, .mipmaps = mipmap };
-		if (catch err = create_basis(inputs, output, format_name, bfmt, type, opts))
+		if (catch err = create_basis(inputs, output, format_name, bfmt, type, opts, ffi_flag))
 		{
 			io::eprintfn("error: %s", err);
 			return 1;
@@ -180,7 +184,7 @@ fn void? create_texture(uint format, vk::FormatInfo fi, String[] inputs, String 
 }
 
 <* Encode one or more images to an ETC1S/UASTC + BasisLZ KTX2 via basis_universal. *>
-fn void? create_basis(String[] inputs, String output, String format_name, uint fmt, basis::TexType type, basis::EncodeOptions opts) @local => @pool()
+fn void? create_basis(String[] inputs, String output, String format_name, uint fmt, basis::TexType type, basis::EncodeOptions opts, bool force_ffi) @local => @pool()
 {
 	// Load every input up front and check they agree on dimensions.
 	image::Image[] images = alloc::new_array(tmem, image::Image, inputs.len);
@@ -199,7 +203,9 @@ fn void? create_basis(String[] inputs, String output, String format_name, uint f
 
 	uint w = images[0].width;
 	uint h = images[0].height;
-	char[] ktx2 = basis::encode(tmem, fmt, pixels, w, h, type, opts)!;
+	char[] ktx2 = force_ffi
+		? basis::encode_ffi(tmem, fmt, pixels, w, h, type, opts)!
+		: basis::encode(tmem, fmt, pixels, w, h, type, opts)!;
 	file::save(output, ktx2)!;
 
 	String scheme = fmt == basis::UASTC_4X4 ? "Zstd" : "BasisLZ";
