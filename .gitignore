@@ -36,12 +36,11 @@ native/build/
 *.so
 *.so.*
 *.dylib
-# ...but DO track the per-platform libktx shared libs (native/build-shared.sh
-# / CI artifacts; loaded via FFI by e.g. the Blender addon) and the linux
-# libc++ linker-script shim that redirects -lc++ to libstdc++.
-!**/ktx.so
-!**/ktx.dylib
-!**/ktx.dll
+# The per-platform libktx shared libs are NOT tracked: release.yml attaches
+# them to the GitHub release of every v* tag as ktx-<triple>.<ext>, and FFI
+# consumers (e.g. the Blender addon) download from there. Local builds still
+# land in <triple>/ for development. Only the linux libc++ linker-script shim
+# (redirects -lc++ to libstdc++) stays tracked.
 !**/libc++.so
 
 # Executables

@@ -1,6 +1,6 @@
-# Builds the native artifacts every platform needs, and uploads them so a
-# maintainer can commit them into the matching <target>/ directories (or a
-# release):
+# Builds the native artifacts every platform needs and uploads them as run
+# artifacts. release.yml calls this workflow on version tags and attaches the
+# same artifacts to the GitHub release (raw files, uniquely named):
 #   - libbasisu.a / basisu.lib — bundled basis_universal static lib, linked by
 #     the ktx.c3l manifest so consumers get ETC1S/BasisLZ without a C++ build.
 #   - ktx.so / ktx.dylib / ktx.dll — the libktx shared library (C API in
@@ -18,6 +18,7 @@ env:
 
 on:
   workflow_dispatch:
+  workflow_call:      # release.yml reuses the whole build matrix on v* tags
   push:
     paths:
       - native/build-basisu.sh

@@ -1,0 +1,53 @@
+# On every v* tag: rebuild all native libs (via build-basisu.yml) and attach
+# them to the tag's GitHub release as raw files — no archives — so consumers
+# can fetch a single lib directly, e.g. the Blender glTF addon downloading
+# only the library matching the user's OS:
+#   https://github.com/<repo>/releases/latest/download/ktx-<triple>.<ext>
+#
+# Asset names embed the target triple because release assets share one flat
+# namespace (two platforms both produce a "ktx.so"/"ktx.dylib"):
+#   ktx-<triple>.{so,dylib,dll}  ktx-windows-x64.lib (import lib)
+#   libbasisu-<triple>.a         basisu-windows-x64.lib
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-basisu.yml
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Rename assets to <name>-<triple>.<ext>
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for dir in artifacts/*/; do
+            name=$(basename "$dir")               # libbasisu-<triple> | libktx-<triple>
+            triple=${name#libbasisu-}; triple=${triple#libktx-}
+            for f in "$dir"*; do
+              base=$(basename "$f")               # e.g. ktx.dylib, libbasisu.a
+              cp "$f" "release/${base%.*}-${triple}.${base##*.}"
+            done
+          done
+          ls -l release/
+      - name: Create release and attach libs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          # --clobber so re-pushing a tag (or re-running the job) refreshes assets.
+          gh release upload "$GITHUB_REF_NAME" release/* --clobber
