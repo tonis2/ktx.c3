@@ -118,7 +118,10 @@ jobs:
           SRC="native/zstd-$VERSION"
           mkdir -p native/build-zstd windows-x64 lib/windows-x64
           # MSVC options in dash form: git-bash mangles //X:... arguments.
-          cl -nologo -O2 -MD -DZSTD_DISABLE_ASM -DZSTD_MULTITHREAD=0 \
+          # -GS- because /GS-compiled objects reference __report_gsfailure,
+          # whose CRT definition collides with the stub c3c's runtime ships
+          # when lld-link builds ktx.dll against this archive.
+          cl -nologo -O2 -MD -GS- -DZSTD_DISABLE_ASM -DZSTD_MULTITHREAD=0 \
             -I "$SRC/lib" -I "$SRC/lib/common" \
             -c "$SRC"/lib/common/*.c "$SRC"/lib/compress/*.c "$SRC"/lib/decompress/*.c \
             -Fonative/build-zstd/
