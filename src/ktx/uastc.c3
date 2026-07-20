@@ -7,7 +7,7 @@
 // dual-plane fields, BISE-packed endpoints, then plain-bit weights filling the
 // block to bit 128.
 module ktx::uastc;
-import ktx::bits, ktx::etc1s;
+import ktx::bits, ktx::etc1s, ktx::parallel;
 
 faultdef INVALID_BLOCK, INVALID_SIZE;
 
@@ -477,33 +477,54 @@ fn void? decode_block(char[] block, char[] out, bool srgb = false)
 	}
 }
 
+struct DecodeJob @local
+{
+	char[] blocks;
+	char[] out;
+	uint width;
+	uint height;
+	uint bw;
+	bool srgb;
+	bool failed;   // only ever written true, so the racing writes are benign
+}
+
+fn void decode_row(void* ctx, usz by) @local
+{
+	DecodeJob* j = (DecodeJob*)ctx;
+	char[64] px;
+	for (uint bx = 0; bx < j.bw; bx++)
+	{
+		if (@catch(decode_block(j.blocks[(by * j.bw + bx) * 16 : 16], px[..], j.srgb)))
+		{
+			j.failed = true;
+			return;
+		}
+		uint copy_w = min(j.width - bx * 4, 4u);
+		uint copy_h = min(j.height - (uint)by * 4, 4u);
+		for (uint y = 0; y < copy_h; y++)
+		{
+			usz dst = ((by * 4 + y) * j.width + (usz)bx * 4) * 4;
+			j.out[dst : copy_w * 4] = px[y * 16 : copy_w * 4];
+		}
+	}
+}
+
 <*
  Decode a whole UASTC image: `blocks` is ceil(w/4)*ceil(h/4) 16-byte blocks in
  raster order (a KTX2 level payload after supercompression is undone), `out`
- is width*height RGBA8. Edge blocks are cropped.
+ is width*height RGBA8. Edge blocks are cropped. Block rows are decoded on
+ `threads` threads (0 = one per core, 1 = inline).
 *>
-fn void? decode_image(char[] blocks, char[] out, uint width, uint height, bool srgb = false)
+fn void? decode_image(char[] blocks, char[] out, uint width, uint height, bool srgb = false, uint threads = 0)
 {
 	uint bw = (width + 3) / 4;
 	uint bh = (height + 3) / 4;
 	if (blocks.len != (usz)bw * bh * 16) return INVALID_SIZE~;
 	if (out.len != (usz)width * height * 4) return INVALID_SIZE~;
 
-	char[64] px;
-	for (uint by = 0; by < bh; by++)
-	{
-		for (uint bx = 0; bx < bw; bx++)
-		{
-			decode_block(blocks[((usz)by * bw + bx) * 16 : 16], px[..], srgb)!;
-			uint copy_w = min(width - bx * 4, 4u);
-			uint copy_h = min(height - by * 4, 4u);
-			for (uint y = 0; y < copy_h; y++)
-			{
-				usz dst = ((usz)(by * 4 + y) * width + (usz)bx * 4) * 4;
-				out[dst : copy_w * 4] = px[y * 16 : copy_w * 4];
-			}
-		}
-	}
+	DecodeJob job = { .blocks = blocks, .out = out, .width = width, .height = height, .bw = bw, .srgb = srgb };
+	parallel::run(bh, &job, &decode_row, threads);
+	if (job.failed) return INVALID_BLOCK~;
 }
 
 // ===========================================================================
@@ -1352,35 +1373,52 @@ fn ulong packed_err(char[] blk, char[] px) @local
 	return e;
 }
 
+struct EncodeJob @local
+{
+	char[] rgba;
+	char[] out;
+	uint width;
+	uint height;
+	uint bw;
+	uint level;
+}
+
+fn void encode_row(void* ctx, usz by) @local
+{
+	EncodeJob* j = (EncodeJob*)ctx;
+	char[64] px;
+	for (uint bx = 0; bx < j.bw; bx++)
+	{
+		for (uint y = 0; y < 4; y++)
+		{
+			uint sy = min((uint)by * 4 + y, j.height - 1);
+			for (uint x = 0; x < 4; x++)
+			{
+				uint sx = min(bx * 4 + x, j.width - 1);
+				usz src = ((usz)sy * j.width + sx) * 4;
+				px[(y * 4 + x) * 4 : 4] = j.rgba[src : 4];
+			}
+		}
+		encode_block(px[..], j.out[(by * j.bw + bx) * 16 : 16], j.level);
+	}
+}
+
 <*
  Encode an image to UASTC blocks: `rgba` is width*height*4 bytes, the result
  is ceil(w/4)*ceil(h/4) 16-byte blocks in raster order (a KTX2 level image,
- before supercompression). Edge blocks pad by clamping.
+ before supercompression). Edge blocks pad by clamping. Block rows are encoded
+ on `threads` threads (0 = one per core, 1 = inline); the output is identical
+ for any thread count.
 *>
-fn char[]? encode_image(Allocator allocator, char[] rgba, uint width, uint height, uint level = 1)
+fn char[]? encode_image(Allocator allocator, char[] rgba, uint width, uint height, uint level = 1, uint threads = 0)
 {
 	if (rgba.len != (usz)width * height * 4) return INVALID_SIZE~;
 	uint bw = (width + 3) / 4;
 	uint bh = (height + 3) / 4;
 	char[] out = alloc::new_array(allocator, char, (sz)((usz)bw * bh * 16));
 
-	char[64] px;
-	for (uint by = 0; by < bh; by++)
-	{
-		for (uint bx = 0; bx < bw; bx++)
-		{
-			for (uint y = 0; y < 4; y++)
-			{
-				uint sy = min(by * 4 + y, height - 1);
-				for (uint x = 0; x < 4; x++)
-				{
-					uint sx = min(bx * 4 + x, width - 1);
-					usz src = ((usz)sy * width + sx) * 4;
-					px[(y * 4 + x) * 4 : 4] = rgba[src : 4];
-				}
-			}
-			encode_block(px[..], out[((usz)by * bw + bx) * 16 : 16], level);
-		}
-	}
+	init_quant();   // the lazy LUT init must not race the workers
+	EncodeJob job = { .rgba = rgba, .out = out, .width = width, .height = height, .bw = bw, .level = level };
+	parallel::run(bh, &job, &encode_row, threads);
 	return out;
 }

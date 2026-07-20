@@ -21,6 +21,10 @@ Vulkan-based engines and asset pipelines.
     byte-for-byte against basis_universal on thousands of blocks.
 - **Mipmap generation:** box filter, sRGB-correct (filters in linear space),
   optional renormalization for normal maps.
+- **Multithreaded encoding** (`std::thread`, no extra dependencies): block
+  encoders and the ETC1S clustering fan out across all cores by default, with
+  byte-identical output at any thread count. 1024x1024 on a 10-core machine:
+  ETC1S 169s→33s, BC7 21s→3.5s, UASTC 3.6s→1.0s.
 - **CLI** built on `getopt.c3l`, images in/out via `image.c3l` (PNG/JPEG).
 
 ## CLI
@@ -161,6 +165,14 @@ build/ktx extract --level 1 --face 2 -o f.png env.ktx2    # a specific level/lay
 packing level (mode-set size) while `--quality` has no effect (it tuned
 basisu's RDO, which the C3 encoder doesn't do yet). Both default to
 `--quality 90 --effort 2`.
+
+Encoding uses every core by default (`ktx::parallel`, a small fork-join helper
+over `std::thread`): UASTC/BC7/BCn encode block rows in parallel and the
+ETC1S k-means/reassignment searches are parallel too. Only the searches run
+concurrently — order-sensitive accumulation stays serial — so **output is
+byte-identical for any thread count**. Library callers can pass `threads: 1`
+(any of `uastc::encode_image`, `etc1s::encode`, `bc7::encode`, `bcn::encode`,
+`uastc::decode_image`) to force single-threaded operation.
 
 Transcode targets are RGBA32, BC1, BC3 and BC7 (BCn via the library's own
 encoders). The only native dependency is zstd — prebuilt per platform as

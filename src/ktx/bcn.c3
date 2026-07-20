@@ -7,6 +7,7 @@
 // (a*(6-N)+b*(N-1))/5 plus 0/255 (6-value mode), truncating division.
 module ktx::bcn;
 import std::core::mem;
+import ktx::parallel;
 
 faultdef INVALID_SIZE, INVALID_INPUT;
 
@@ -36,39 +37,51 @@ fn sz encoded_size(BcnFormat fmt, uint width, uint height)
  Channels used: BC1 = RGB, BC3 = RGBA, BC4 = R, BC5 = RG.
  Returns a buffer of exactly encoded_size(fmt, width, height) bytes.
 *>
-fn char[]? encode(Allocator allocator, BcnFormat fmt, char[] rgba, uint width, uint height)
+fn char[]? encode(Allocator allocator, BcnFormat fmt, char[] rgba, uint width, uint height, uint threads = 0)
 {
 	if (width == 0 || height == 0) return INVALID_SIZE~;
 	if (rgba.len != (sz)width * height * 4) return INVALID_INPUT~;
 
 	char[] out = alloc::new_array(allocator, char, encoded_size(fmt, width, height));
-	sz bb = block_bytes(fmt);
-	uint bx_count = (width + 3) / 4;
-	uint by_count = (height + 3) / 4;
+	EncodeJob job = { .rgba = rgba, .out = out, .fmt = fmt, .width = width, .height = height,
+		.bx_count = (width + 3) / 4, .bb = block_bytes(fmt) };
+	parallel::run((usz)((height + 3) / 4), &job, &encode_row, threads);
+	return out;
+}
 
+struct EncodeJob @private
+{
+	char[] rgba;
+	char[] out;
+	BcnFormat fmt;
+	uint width;
+	uint height;
+	uint bx_count;
+	sz bb;
+}
+
+fn void encode_row(void* ctx, usz by) @private
+{
+	EncodeJob* j = (EncodeJob*)ctx;
 	char[64] px; // 16 texels RGBA, edge-replicated
-	for (uint by = 0; by < by_count; by++)
+	for (uint bx = 0; bx < j.bx_count; bx++)
 	{
-		for (uint bx = 0; bx < bx_count; bx++)
+		fetch_block(j.rgba, j.width, j.height, bx * 4, (uint)by * 4, &px);
+		char* dst = &j.out[((sz)by * j.bx_count + bx) * j.bb];
+		switch (j.fmt)
 		{
-			fetch_block(rgba, width, height, bx * 4, by * 4, &px);
-			char* dst = &out[((sz)by * bx_count + bx) * bb];
-			switch (fmt)
-			{
-				case BC1:
-					encode_bc1_block(&px, dst);
-				case BC3:
-					encode_bc4_block(&px, 3, dst);      // alpha
-					encode_bc1_block(&px, dst + 8);     // color
-				case BC4:
-					encode_bc4_block(&px, 0, dst);
-				case BC5:
-					encode_bc4_block(&px, 0, dst);
-					encode_bc4_block(&px, 1, dst + 8);
-			}
+			case BC1:
+				encode_bc1_block(&px, dst);
+			case BC3:
+				encode_bc4_block(&px, 3, dst);      // alpha
+				encode_bc1_block(&px, dst + 8);     // color
+			case BC4:
+				encode_bc4_block(&px, 0, dst);
+			case BC5:
+				encode_bc4_block(&px, 0, dst);
+				encode_bc4_block(&px, 1, dst + 8);
 		}
 	}
-	return out;
 }
 
 <*
