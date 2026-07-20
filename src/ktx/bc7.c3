@@ -13,6 +13,7 @@
 *>
 module ktx::bc7;
 import std::math;
+import ktx::parallel;
 
 faultdef INVALID_SIZE;
 
@@ -225,7 +226,7 @@ fn sz encoded_size(uint width, uint height)
  image is encoded as opaque. Non-multiple-of-4 dimensions are handled by
  replicating edge pixels into partial blocks.
 *>
-fn char[]? encode(Allocator allocator, char[] rgba, uint width, uint height, bool has_alpha = true)
+fn char[]? encode(Allocator allocator, char[] rgba, uint width, uint height, bool has_alpha = true, uint threads = 0)
 {
 	if (rgba.len != (sz)width * (sz)height * 4) return INVALID_SIZE~;
 	if (width == 0 || height == 0)
@@ -236,16 +237,30 @@ fn char[]? encode(Allocator allocator, char[] rgba, uint width, uint height, boo
 	char[] out = alloc::new_array(allocator, char, encoded_size(width, height));
 	uint bw = (width + 3) / 4;
 	uint bh = (height + 3) / 4;
-	char[64] px;
-	for (uint by = 0; by < bh; by++)
-	{
-		for (uint bx = 0; bx < bw; bx++)
-		{
-			extract_block(rgba, width, height, bx, by, has_alpha, &px[0]);
-			encode_block(&px[0], out.ptr + ((sz)by * (sz)bw + (sz)bx) * 16);
-		}
-	}
+	EncodeJob job = { .rgba = rgba, .out = out, .width = width, .height = height, .bw = bw, .has_alpha = has_alpha };
+	parallel::run(bh, &job, &encode_row, threads);
 	return out;
+}
+
+struct EncodeJob @private
+{
+	char[] rgba;
+	char[] out;
+	uint width;
+	uint height;
+	uint bw;
+	bool has_alpha;
+}
+
+fn void encode_row(void* ctx, usz by) @private
+{
+	EncodeJob* j = (EncodeJob*)ctx;
+	char[64] px;
+	for (uint bx = 0; bx < j.bw; bx++)
+	{
+		extract_block(j.rgba, j.width, j.height, bx, (uint)by, j.has_alpha, &px[0]);
+		encode_block(&px[0], j.out.ptr + (by * j.bw + bx) * 16);
+	}
 }
 
 <*

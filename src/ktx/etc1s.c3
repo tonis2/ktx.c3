@@ -10,7 +10,7 @@
 // codes per-block (endpoint index, selector index) pairs with spatial
 // prediction, delta coding and a selector move-to-front history buffer.
 module ktx::etc1s;
-import ktx::bits, ktx::huffman;
+import ktx::bits, ktx::huffman, ktx::parallel;
 import std::core::mem;
 import std::sort, std::math;
 
@@ -636,8 +636,40 @@ fn void Codebook.write_block(&self, char[] out, uint width, uint height, uint bx
 // ---------------------------------------------------------------------------
 // Frontend: clustering
 
+// The k-means assignment searches below run across threads, but only the
+// search (which writes b.endpoint/b.selector, one block each) is parallel —
+// the float center accumulation stays serial in block order, so the resulting
+// codebooks are byte-identical for any thread count.
+struct EpAssignJob @local
+{
+	EncBlock[] blocks;
+	float[3][] centers;
+	uint k;
+}
+
+fn void ep_assign(void* ctx, usz i) @local
+{
+	EpAssignJob* j = (EpAssignJob*)ctx;
+	EncBlock* b = &j.blocks[i];
+	uint bc;
+	float bd = 1e30f;
+	for (uint c = 0; c < j.k; c++)
+	{
+		float d0 = b.mean[0] - j.centers[c][0];
+		float d1 = b.mean[1] - j.centers[c][1];
+		float d2 = b.mean[2] - j.centers[c][2];
+		float d = d0 * d0 + d1 * d1 + d2 * d2;
+		if (d < bd)
+		{
+			bd = d;
+			bc = c;
+		}
+	}
+	b.endpoint = bc;
+}
+
 <* Deterministic k-means over per-block features; returns cluster count used. *>
-fn uint kmeans_endpoints(EncBlock[] blocks, uint k, Allocator scratch) @local
+fn uint kmeans_endpoints(EncBlock[] blocks, uint k, Allocator scratch, uint threads = 0) @local
 {
 	uint n = (uint)blocks.len;
 	k = min(k, n);
@@ -661,6 +693,7 @@ fn uint kmeans_endpoints(EncBlock[] blocks, uint k, Allocator scratch) @local
 
 	float[3][] sums = alloc::new_array(scratch, float[3], (sz)k);
 	uint[] counts = alloc::new_array(scratch, uint, (sz)k);
+	EpAssignJob job = { .blocks = blocks, .centers = centers, .k = k };
 	for (uint iter = 0; iter < 4; iter++)
 	{
 		for (uint c = 0; c < k; c++)
@@ -668,23 +701,10 @@ fn uint kmeans_endpoints(EncBlock[] blocks, uint k, Allocator scratch) @local
 			sums[c] = { 0, 0, 0 };
 			counts[c] = 0;
 		}
+		parallel::run(blocks.len, &job, &ep_assign, threads);
 		foreach (&b : blocks)
 		{
-			uint bc;
-			float bd = 1e30f;
-			for (uint c = 0; c < k; c++)
-			{
-				float d0 = b.mean[0] - centers[c][0];
-				float d1 = b.mean[1] - centers[c][1];
-				float d2 = b.mean[2] - centers[c][2];
-				float d = d0 * d0 + d1 * d1 + d2 * d2;
-				if (d < bd)
-				{
-					bd = d;
-					bc = c;
-				}
-			}
-			b.endpoint = bc;
+			uint bc = b.endpoint;
 			sums[bc][0] += b.mean[0];
 			sums[bc][1] += b.mean[1];
 			sums[bc][2] += b.mean[2];
@@ -701,7 +721,37 @@ fn uint kmeans_endpoints(EncBlock[] blocks, uint k, Allocator scratch) @local
 	return k;
 }
 
-fn uint kmeans_selectors(EncBlock[] blocks, uint k, Allocator scratch) @local
+struct SelAssignJob @local
+{
+	EncBlock[] blocks;
+	float[16][] centers;
+	uint k;
+}
+
+fn void sel_assign(void* ctx, usz i) @local
+{
+	SelAssignJob* j = (SelAssignJob*)ctx;
+	EncBlock* b = &j.blocks[i];
+	uint bc;
+	float bd = 1e30f;
+	for (uint c = 0; c < j.k; c++)
+	{
+		float d;
+		for (uint t = 0; t < 16; t++)
+		{
+			float dt = (float)b.levels[t] - j.centers[c][t];
+			d += dt * dt;
+		}
+		if (d < bd)
+		{
+			bd = d;
+			bc = c;
+		}
+	}
+	b.selector = bc;
+}
+
+fn uint kmeans_selectors(EncBlock[] blocks, uint k, Allocator scratch, uint threads = 0) @local
 {
 	uint n = (uint)blocks.len;
 	k = min(k, n);
@@ -726,6 +776,7 @@ fn uint kmeans_selectors(EncBlock[] blocks, uint k, Allocator scratch) @local
 
 	float[16][] sums = alloc::new_array(scratch, float[16], (sz)k);
 	uint[] counts = alloc::new_array(scratch, uint, (sz)k);
+	SelAssignJob job = { .blocks = blocks, .centers = centers, .k = k };
 	for (uint iter = 0; iter < 4; iter++)
 	{
 		for (uint c = 0; c < k; c++)
@@ -733,25 +784,10 @@ fn uint kmeans_selectors(EncBlock[] blocks, uint k, Allocator scratch) @local
 			sums[c] = {};
 			counts[c] = 0;
 		}
+		parallel::run(blocks.len, &job, &sel_assign, threads);
 		foreach (&b : blocks)
 		{
-			uint bc;
-			float bd = 1e30f;
-			for (uint c = 0; c < k; c++)
-			{
-				float d;
-				for (uint t = 0; t < 16; t++)
-				{
-					float dt = (float)b.levels[t] - centers[c][t];
-					d += dt * dt;
-				}
-				if (d < bd)
-				{
-					bd = d;
-					bc = c;
-				}
-			}
-			b.selector = bc;
+			uint bc = b.selector;
 			for (uint t = 0; t < 16; t++) sums[bc][t] += (float)b.levels[t];
 			counts[bc]++;
 		}
@@ -1015,6 +1051,32 @@ fn huffman::EncodeTable? build_model(Allocator allocator, uint[] freqs) @local
 	return huffman::build_encode(allocator, freqs);
 }
 
+struct ReassignJob @local
+{
+	EncBlock[] blocks;
+	Endpoint[] eps;
+	Selector[] sels;
+	uint num_s;
+}
+
+fn void sel_reassign(void* ctx, usz i) @local
+{
+	ReassignJob* j = (ReassignJob*)ctx;
+	EncBlock* b = &j.blocks[i];
+	ulong be = ~(ulong)0;
+	uint bs;
+	for (uint c = 0; c < j.num_s; c++)
+	{
+		ulong e = block_error_with_rows(b, j.eps[b.endpoint], j.sels[c].rows);
+		if (e < be)
+		{
+			be = e;
+			bs = c;
+		}
+	}
+	b.selector = bs;
+}
+
 // ---------------------------------------------------------------------------
 // Top-level encode
 
@@ -1022,9 +1084,11 @@ fn huffman::EncodeTable? build_model(Allocator allocator, uint[] freqs) @local
  Encode slices into ETC1S/BasisLZ global codebooks + per-slice streams. All
  slices share the codebooks (that is the format). `quality` 0..100 maps to
  codebook-size targets following basisu's curve. Everything is allocated from
- `allocator`; scratch comes from the temp pool.
+ `allocator`; scratch comes from the temp pool. The clustering searches run on
+ `threads` threads (0 = one per core, 1 = inline); the output is identical for
+ any thread count.
 *>
-fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality) => @pool()
+fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality, uint threads = 0) => @pool()
 {
 	if (!slices.len) return INVALID_INPUT~;
 
@@ -1079,7 +1143,7 @@ fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality) => @poo
 	uint target_e;
 	uint target_s;
 	cluster_targets(quality, (uint)total_blocks, &target_e, &target_s);
-	uint num_e = kmeans_endpoints(blocks, target_e, tmem);
+	uint num_e = kmeans_endpoints(blocks, target_e, tmem, threads);
 
 	Endpoint[] eps = alloc::new_array(tmem, Endpoint, (sz)num_e);
 	{
@@ -1124,7 +1188,7 @@ fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality) => @poo
 	}
 
 	// --- selector codebook ---
-	uint num_s = kmeans_selectors(blocks, target_s, tmem);
+	uint num_s = kmeans_selectors(blocks, target_s, tmem, threads);
 	Selector[] sels = alloc::new_array(tmem, Selector, (sz)num_s);
 	{
 		// Refit: per cluster, per texel, the level minimizing member error.
@@ -1173,21 +1237,8 @@ fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality) => @poo
 	// Exact selector reassignment (skip for very large codebooks).
 	if (num_s <= 2048)
 	{
-		foreach (&b : blocks)
-		{
-			ulong be = ~(ulong)0;
-			uint bs;
-			for (uint c = 0; c < num_s; c++)
-			{
-				ulong e = block_error_with_rows(b, eps[b.endpoint], sels[c].rows);
-				if (e < be)
-				{
-					be = e;
-					bs = c;
-				}
-			}
-			b.selector = bs;
-		}
+		ReassignJob job = { .blocks = blocks, .eps = eps, .sels = sels, .num_s = num_s };
+		parallel::run(blocks.len, &job, &sel_reassign, threads);
 	}
 
 	// --- prune unused entries, sort endpoints for delta locality, remap ---
