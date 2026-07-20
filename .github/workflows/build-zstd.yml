@@ -45,7 +45,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: libzstd-${{ matrix.triple }}
-          path: ${{ matrix.triple }}/libzstd.a
+          path: lib/${{ matrix.triple }}/libzstd.a
           if-no-files-found: error
 
       - name: Install c3c
@@ -83,7 +83,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: libzstd-macos-x64
-          path: macos-x64/libzstd.a
+          path: lib/macos-x64/libzstd.a
           if-no-files-found: error
       - name: Install c3c
         run: |
@@ -112,20 +112,22 @@ jobs:
           set -euo pipefail
           # Pinned version is the single source of truth in the build script.
           VERSION=$(grep -oE 'ZSTD_VERSION="[0-9.]+"' native/build-zstd.sh | cut -d'"' -f2)
-          curl -fsSL "https://github.com/facebook/zstd/releases/download/v$VERSION/zstd-$VERSION.tar.gz" | tar xz -C native
+          # Extract only lib/ — the tarball's tests/ contains symlinks that
+          # Windows tar cannot create (exit 2 under pipefail).
+          curl -fsSL "https://github.com/facebook/zstd/releases/download/v$VERSION/zstd-$VERSION.tar.gz" | tar xz -C native "zstd-$VERSION/lib"
           SRC="native/zstd-$VERSION"
-          mkdir -p native/build-zstd windows-x64
+          mkdir -p native/build-zstd windows-x64 lib/windows-x64
           # MSVC options in dash form: git-bash mangles //X:... arguments.
           cl -nologo -O2 -MD -DZSTD_DISABLE_ASM -DZSTD_MULTITHREAD=0 \
             -I "$SRC/lib" -I "$SRC/lib/common" \
             -c "$SRC"/lib/common/*.c "$SRC"/lib/compress/*.c "$SRC"/lib/decompress/*.c \
             -Fonative/build-zstd/
-          lib -nologo "-OUT:windows-x64/zstd.lib" native/build-zstd/*.obj
-          test -f windows-x64/zstd.lib
+          lib -nologo "-OUT:lib/windows-x64/zstd.lib" native/build-zstd/*.obj
+          test -f lib/windows-x64/zstd.lib
       - uses: actions/upload-artifact@v4
         with:
           name: libzstd-windows-x64
-          path: windows-x64/zstd.lib
+          path: lib/windows-x64/zstd.lib
           if-no-files-found: error
 
       - name: Install c3c
@@ -143,7 +145,7 @@ jobs:
           # the runner itself (cygpath output risks a stray \r in the arg).
           # -vv prints the linker invocation for diagnosis.
           c3c dynamic-lib src/ktx/*.c3 src/capi/*.c3 -O2 --no-headers -vv \
-            -z '${{ github.workspace }}\windows-x64\zstd.lib' -o windows-x64/ktx
+            -z '${{ github.workspace }}\lib\windows-x64\zstd.lib' -o windows-x64/ktx
       - name: Smoke-test the C API
         shell: bash
         run: python test/capi_smoke.py windows-x64/ktx.dll

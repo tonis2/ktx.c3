@@ -89,8 +89,8 @@ payloads (`tex.image(level, layer, face)`) to feed straight into
 `vkCmdCopyBufferToImage`, `vk_format` matching `VkFormat` numerically.
 
 No system `libzstd` is needed: a prebuilt `libzstd.a` is bundled per platform
-(`<target>/libzstd.a`, built by `native/build-zstd.sh`) and the manifest links
-it — the only native code in the library.
+(`lib/<target>/libzstd.a`, built by `native/build-zstd.sh`) and the manifest
+links it — the only native code in the library.
 
 ## Tests
 
@@ -164,13 +164,13 @@ basisu's RDO, which the C3 encoder doesn't do yet). Both default to
 
 Transcode targets are RGBA32, BC1, BC3 and BC7 (BCn via the library's own
 encoders). The only native dependency is zstd — prebuilt per platform as
-`<target>/libzstd.a`, so this works out of the box with **no system libzstd
+`lib/<target>/libzstd.a`, so this works out of the box with **no system libzstd
 and no C++ runtime**. zstd is *not* vendored; to rebuild the lib (only needed
 to bump zstd or add a platform), run the build script — it fetches the pinned
 release into `native/` (gitignored):
 
 ```sh
-native/build-zstd.sh    # -> <target>/libzstd.a
+native/build-zstd.sh    # -> lib/<target>/libzstd.a
 ```
 
 CI builds every platform this way via `.github/workflows/build-zstd.yml`.

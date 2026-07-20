@@ -14,7 +14,7 @@
   // Output location, relative to project file.
   "output": "build",
   // The only native dependency: zstd (bound in src/ktx/zstd.c3), a prebuilt
-  // static lib per platform under <arch>/libzstd.a (native/build-zstd.sh).
+  // static lib per platform under lib/<arch>/libzstd.a (native/build-zstd.sh).
   // The ETC1S/UASTC codec is pure C3 (src/ktx/{uastc,etc1s,basis}.c3).
   "linked-libraries": [ "zstd" ],
   // The new macOS linker (ld-prime) hard-errors on foreign files found in
@@ -22,7 +22,7 @@
   // skipping them, so each platform gets its own target with only its own
   // lib directory. `c3c build` builds the default (macOS) target; on linux use
   // `c3c build ktx-linux`.
-  "linker-search-paths": [ "macos-aarch64" ],
+  "linker-search-paths": [ "lib/macos-aarch64" ],
   "targets": {
     "ktx": {
       // Executable or library.
@@ -30,7 +30,7 @@
     },
     "ktx-linux": {
       "type": "executable",
-      "linker-search-paths": [ "linux-x64", "linux-aarch64" ]
+      "linker-search-paths": [ "lib/linux-x64", "lib/linux-aarch64" ]
     }
   },
   // Global settings.

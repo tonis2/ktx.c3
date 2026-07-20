@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build the libktx shared library (C API from src/capi + library modules from
-# src/ktx) for the host target, linking the prebuilt <target>/libzstd.a.
+# src/ktx) for the host target, linking the prebuilt lib/<target>/libzstd.a.
 # The result lands next to it: <target>/libktx.so / libktx.dylib.
 #
 # Consumers (e.g. the Blender glTF exporter addon) load it via ctypes/FFI —
 # see src/capi/capi.c3 for the exported functions.
 #
-# Requires <target>/libzstd.a built WITH PIC (native/build-zstd.sh does
+# Requires lib/<target>/libzstd.a built WITH PIC (native/build-zstd.sh does
 # this). Usage:  native/build-shared.sh [target-triple]
 #
 # The triple names match c3c --list-targets, so a non-host triple simply
@@ -34,15 +34,16 @@ if [ "$triple" != "$host" ]; then
 fi
 OUT="$REPO_ROOT/$triple"
 
-if [ ! -f "$OUT/libzstd.a" ]; then
-  echo "$OUT/libzstd.a missing — run native/build-zstd.sh $triple first" >&2
+ZSTD_DIR="$REPO_ROOT/lib/$triple"
+if [ ! -f "$ZSTD_DIR/libzstd.a" ]; then
+  echo "$ZSTD_DIR/libzstd.a missing — run native/build-zstd.sh $triple first" >&2
   exit 1
 fi
 
 cd "$REPO_ROOT"
 c3c dynamic-lib src/ktx/*.c3 src/capi/*.c3 \
   -O2 --reloc=PIC \
-  -L "$OUT" -l zstd \
+  -L "$ZSTD_DIR" -l zstd \
   --no-headers ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} \
   -o "$OUT/ktx"
 
