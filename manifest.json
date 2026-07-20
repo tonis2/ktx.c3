@@ -8,31 +8,25 @@
   "sources": [ "src/ktx/**" ],
   // No C3 library dependencies: ktx::* uses only the standard library.
   "dependencies": [],
-  // Native dependency: basis_universal (ETC1S/UASTC + BasisLZ, via src/ktx/basis.c3).
-  // Each target links the prebuilt static lib bundled at <target>/libbasisu.a, which
-  // basis_universal is C++, so a C++ runtime is linked per platform (-lc++ / -lstdc++).
-  // basis bundles a full zstd that also satisfies the container's ZSTD_* calls, so
-  // NO separate system libzstd is required.
+  // The one native dependency: zstd (bound in src/ktx/zstd.c3), bundled as a
+  // prebuilt static lib per target at <target>/libzstd.a (native/build-zstd.sh).
+  // Plain C, no runtime baggage — the ETC1S/UASTC codec itself is pure C3
+  // (src/ktx/{uastc,etc1s,basis}.c3), so no C++ runtime is linked.
   "targets": {
     "macos-aarch64": {
-      "linked-libraries": [ "basisu" ],
-      "link-args": [ "-lc++" ]
+      "linked-libraries": [ "zstd" ]
     },
     "macos-x64": {
-      "linked-libraries": [ "basisu" ],
-      "link-args": [ "-lc++" ]
+      "linked-libraries": [ "zstd" ]
     },
     "linux-x64": {
-      "linked-libraries": [ "basisu" ],
-      "link-args": [ "-lstdc++", "-lm", "-lpthread" ]
+      "linked-libraries": [ "zstd" ]
     },
     "linux-aarch64": {
-      "linked-libraries": [ "basisu" ],
-      "link-args": [ "-lstdc++", "-lm", "-lpthread" ]
+      "linked-libraries": [ "zstd" ]
     },
     "windows-x64": {
-      // MSVC links the C++ runtime automatically.
-      "linked-libraries": [ "basisu" ]
+      "linked-libraries": [ "zstd" ]
     }
   }
 }

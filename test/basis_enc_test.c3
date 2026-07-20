@@ -1,16 +1,15 @@
 // Phase-4/5 differential tests (docs/basis-rewrite.md): the pure-C3 UASTC and
-// ETC1S encoders behind basis::encode. Gates, per the plan:
-//  - interop: the bundled basisu transcoder (official code, via
-//    basis::transcode_ffi) must decode our KTX2 bit-identically to our own
-//    decoder, on every mip level;
-//  - quality: PSNR vs the source must stay within 1 dB of what basisu's own
-//    q90/e2 encode achieves on the same image (we currently beat it);
-//  - size: recorded and printed; only a loose 2.5x bound is asserted, since
-//    the C3 encoder has no RDO yet (the plan tracks, not blocks, this gap).
-// Needs test/golden/ (sh test/gen-golden.sh): source pixels come from the
-// <img>.src.bin dumps, the basisu quality baseline from the recorded
-// <img>-uastc*-q90-mip goldens (mipped, like the encode under test). Skips quietly when goldens are absent,
-// but never accepts a partial set.
+// ETC1S encoders behind basis::encode, gated against the recorded golden data:
+//  - every mip level of a C3-encoded file must transcode through the C3
+//    decoder (whose bit-exactness against basisu is proven separately by
+//    uastc_test.c3 / etc1s_test.c3 on the golden files);
+//  - level-0 PSNR vs the true source must stay within a margin of what
+//    basisu's own q90/e2 encode achieved on the same image;
+//  - sizes are printed with loose bounds (no RDO / no cluster-merge yet).
+// Pre-cutover these also asserted that basisu's transcoder decodes our files
+// bit-identically to ours (it did, for every format/shape/level); that FFI
+// oracle is gone since phase 6. Needs test/golden/ (see gen-golden.sh); skips
+// quietly when absent, but never accepts a partial set.
 module basis_enc_testutil;
 import ktx::basis, ktx::container;
 import ktx_testutil;
@@ -35,9 +34,8 @@ fn Result? check(String img, String golden_base, bool srgb, uint dim, uint fmt) 
 	char[] ktx2 = basis::encode(tmem, fmt, imgs[..], dim, dim, basis::TexType.D2,
 		{ .quality = 90, .effort = 2, .srgb = srgb, .mipmaps = true })!;
 
-	// Every level transcodes identically through the C3 decoder and the
-	// bundled basisu transcoder (the interop oracle). ETC1S/BasisLZ files are
-	// rejected by container::read by design, so only parse UASTC ones.
+	// Every level must transcode; ETC1S/BasisLZ files are rejected by
+	// container::read by design, so only parse UASTC ones.
 	uint levels = 7;
 	if (fmt == basis::UASTC_4X4)
 	{
@@ -46,9 +44,8 @@ fn Result? check(String img, String golden_base, bool srgb, uint dim, uint fmt) 
 	}
 	for (uint l = 0; l < levels; l++)
 	{
-		basis::Transcoded ours = basis::transcode(tmem, ktx2, l, 0, 0, basis::TF_RGBA32, 4)!;
-		basis::Transcoded ffis = basis::transcode_ffi(tmem, ktx2, l, 0, 0, basis::TF_RGBA32, 4)!;
-		assert(ours.data == ffis.data, "%s level %d: basisu decodes our file differently", img, l);
+		basis::Transcoded t = basis::transcode(tmem, ktx2, l, 0, 0, basis::TF_RGBA32, 4)!;
+		assert(t.width == max(dim >> l, 1u), "%s level %d: wrong width %d", img, l, t.width);
 	}
 
 	basis::Transcoded l0 = basis::transcode(tmem, ktx2, 0, 0, 0, basis::TF_RGBA32, 4)!;
@@ -60,22 +57,33 @@ fn Result? check(String img, String golden_base, bool srgb, uint dim, uint fmt) 
 	};
 }
 
-<* Cube/array shapes: C3-encoded faces/layers must round-trip per image. *>
-fn void? check_shapes(char[] src, uint dim, uint fmt) => @pool()
+<*
+ Cube/array shapes must round-trip per image. UASTC block encoding is a pure
+ per-image function, so a cube face must decode identically to the same image
+ encoded as a 2D texture; ETC1S codebooks are global per file, so its faces
+ are only checked for a sane PSNR.
+*>
+fn void? check_shapes(char[] src, uint dim) => @pool()
 {
 	char[][6] faces = { src, src, src, src, src, src };
-	char[] cube = basis::encode(tmem, fmt, faces[..], dim, dim, basis::TexType.CUBE,
-		{ .quality = 90, .effort = 2, .srgb = true, .mipmaps = false })!;
-	basis::Transcoded a = basis::transcode(tmem, cube, 0, 0, 5, basis::TF_RGBA32, 4)!;
-	basis::Transcoded b = basis::transcode_ffi(tmem, cube, 0, 0, 5, basis::TF_RGBA32, 4)!;
-	assert(a.data == b.data, "cube face 5 decodes differently via basisu");
+	char[][1] single = { src };
+	basis::EncodeOptions opts = { .quality = 90, .effort = 2, .srgb = true, .mipmaps = false };
+
+	char[] ucube = basis::encode(tmem, basis::UASTC_4X4, faces[..], dim, dim, basis::TexType.CUBE, opts)!;
+	char[] u2d = basis::encode(tmem, basis::UASTC_4X4, single[..], dim, dim, basis::TexType.D2, opts)!;
+	basis::Transcoded a = basis::transcode(tmem, ucube, 0, 0, 5, basis::TF_RGBA32, 4)!;
+	basis::Transcoded b = basis::transcode(tmem, u2d, 0, 0, 0, basis::TF_RGBA32, 4)!;
+	assert(a.data == b.data, "uastc cube face 5 must decode like the 2D encode of the same image");
 
 	char[][2] layers = { src, src };
-	char[] arr = basis::encode(tmem, fmt, layers[..], dim, dim, basis::TexType.ARRAY,
-		{ .quality = 90, .effort = 2, .srgb = true, .mipmaps = false })!;
-	basis::Transcoded c = basis::transcode(tmem, arr, 0, 1, 0, basis::TF_RGBA32, 4)!;
-	basis::Transcoded d = basis::transcode_ffi(tmem, arr, 0, 1, 0, basis::TF_RGBA32, 4)!;
-	assert(c.data == d.data, "array layer 1 decodes differently via basisu");
+	char[] uarr = basis::encode(tmem, basis::UASTC_4X4, layers[..], dim, dim, basis::TexType.ARRAY, opts)!;
+	basis::Transcoded c = basis::transcode(tmem, uarr, 0, 1, 0, basis::TF_RGBA32, 4)!;
+	assert(c.data == b.data, "uastc array layer 1 must decode like the 2D encode of the same image");
+
+	char[] ecube = basis::encode(tmem, basis::ETC1S, faces[..], dim, dim, basis::TexType.CUBE, opts)!;
+	basis::Transcoded e = basis::transcode(tmem, ecube, 0, 0, 5, basis::TF_RGBA32, 4)!;
+	double db = ktx_testutil::psnr(e.data, src);
+	assert(db > 25.0, "etc1s cube face 5: %.2f dB", db);
 }
 
 module basis_enc_tests @test;
@@ -83,7 +91,7 @@ import basis_enc_testutil;
 import ktx::basis;
 import std::io, std::io::file;
 
-fn void uastc_encode_interop_and_quality()
+fn void uastc_encode_quality()
 {
 	String[5] imgs = { "gradient", "detail", "alpha", "gray", "normal" };
 	String[5] bases = {
@@ -106,7 +114,7 @@ fn void uastc_encode_interop_and_quality()
 	assert(checked == 0 || checked == 5, "partial golden set: %d of 5", checked);
 }
 
-fn void etc1s_encode_interop_and_quality()
+fn void etc1s_encode_quality()
 {
 	String[5] imgs = { "gradient", "detail", "alpha", "gray", "normal" };
 	String[5] bases = {
@@ -132,11 +140,10 @@ fn void etc1s_encode_interop_and_quality()
 	assert(checked == 0 || checked == 5, "partial golden set: %d of 5", checked);
 }
 
-fn void uastc_encode_cube_and_array()
+fn void encode_cube_and_array()
 {
 	char[]? src = file::load(mem, "test/golden/detail.src.bin");
 	if (catch src) return;   // goldens not generated
 	defer free(src.ptr);
-	basis_enc_testutil::check_shapes(src, 64, basis::UASTC_4X4)!!;
-	basis_enc_testutil::check_shapes(src, 64, basis::ETC1S)!!;
+	basis_enc_testutil::check_shapes(src, 64)!!;
 }

@@ -13,11 +13,10 @@
   "build-dir": "build",
   // Output location, relative to project file.
   "output": "build",
-  // basis_universal (ETC1S/UASTC + BasisLZ, via src/ktx/basis.c3) ships a
-  // prebuilt static lib per platform under <arch>/libbasisu.a. It bundles a full
-  // zstd, which also satisfies the container's ZSTD_* calls, so no separate
-  // system libzstd is needed. "c++" links the C++ runtime basis_universal needs.
-  "linked-libraries": [ "basisu", "c++" ],
+  // The only native dependency: zstd (bound in src/ktx/zstd.c3), a prebuilt
+  // static lib per platform under <arch>/libzstd.a (native/build-zstd.sh).
+  // The ETC1S/UASTC codec is pure C3 (src/ktx/{uastc,etc1s,basis}.c3).
+  "linked-libraries": [ "zstd" ],
   // The new macOS linker (ld-prime) hard-errors on foreign files found in
   // search paths (linux-x64/libbasisu.a, the linux libc++.so shim) instead of
   // skipping them, so each platform gets its own target with only its own

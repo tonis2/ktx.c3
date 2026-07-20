@@ -7,6 +7,8 @@
 *.obj
 *.elf
 
+native/
+
 # Linker output
 *.ilk
 *.map
@@ -21,15 +23,10 @@
 *.a
 *.la
 *.lo
-# ...but DO track the bundled basis_universal static libs shipped per platform
-# (see native/build-basisu.sh). Consider git-lfs for these multi-MB binaries.
-!**/libbasisu.a
-!**/basisu.lib
-
-# basis_universal source + build output (fetched on demand by native/build-basisu.sh,
-# not vendored — only the CI lib-build job or a manual rebuild needs it)
-native/basis_universal/
-native/build/
+# ...but DO track the bundled zstd static libs shipped per platform
+# (see native/build-zstd.sh) — the library's only native dependency.
+!**/libzstd.a
+!**/zstd.lib
 
 # Shared objects (inc. Windows DLLs)
 *.dll
@@ -39,9 +36,7 @@ native/build/
 # The per-platform libktx shared libs are NOT tracked: release.yml attaches
 # them to the GitHub release of every v* tag as ktx-<triple>.<ext>, and FFI
 # consumers (e.g. the Blender addon) download from there. Local builds still
-# land in <triple>/ for development. Only the linux libc++ linker-script shim
-# (redirects -lc++ to libstdc++) stays tracked.
-!**/libc++.so
+# land in <triple>/ for development.
 
 # Executables
 *.exe

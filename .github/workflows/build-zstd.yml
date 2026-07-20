@@ -1,16 +1,17 @@
 # Builds the native artifacts every platform needs and uploads them as run
 # artifacts. release.yml calls this workflow on version tags and attaches the
 # same artifacts to the GitHub release (raw files, uniquely named):
-#   - libbasisu.a / basisu.lib — bundled basis_universal static lib, linked by
-#     the ktx.c3l manifest so consumers get ETC1S/BasisLZ without a C++ build.
+#   - libzstd.a / zstd.lib — the bundled zstd static lib (the library's only
+#     native dependency since the pure-C3 basis rewrite), linked by the
+#     ktx.c3l manifest.
 #   - ktx.so / ktx.dylib / ktx.dll — the libktx shared library (C API in
 #     src/capi) for FFI consumers, e.g. the Blender glTF exporter addon.
 #
-# basis_universal is NOT a submodule of this repo (it's large and only needed
-# here); each runner fetches it at the pinned commit via native/build-basisu.sh.
-# c3c is installed from its release archives. There is no linux-aarch64 or
-# x86_64 macOS c3c release binary: linux-aarch64 gets no shared lib for now,
-# and the macos-x64 dylib is cross-compiled from the arm64 runner.
+# zstd is NOT vendored; each runner fetches the pinned release tarball via
+# native/build-zstd.sh. c3c is installed from its release archives. There is
+# no linux-aarch64 or x86_64 macOS c3c release binary: linux-aarch64 gets no
+# shared lib for now, and the macos-x64 dylib is cross-compiled from the arm64
+# runner.
 name: build-native
 
 env:
@@ -21,11 +22,11 @@ on:
   workflow_call:      # release.yml reuses the whole build matrix on v* tags
   push:
     paths:
-      - native/build-basisu.sh
+      - native/build-zstd.sh
       - native/build-shared.sh
       - src/ktx/**
       - src/capi/**
-      - .github/workflows/build-basisu.yml
+      - .github/workflows/build-zstd.yml
 
 jobs:
   unix:
@@ -38,13 +39,13 @@ jobs:
           - { os: ubuntu-24.04-arm, triple: linux-aarch64 }           # no linux-aarch64 c3c release
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4          # no submodules: the script fetches basis
-      - name: Build libbasisu.a
-        run: ./native/build-basisu.sh ${{ matrix.triple }}
+      - uses: actions/checkout@v4          # no submodules: the script fetches zstd
+      - name: Build libzstd.a
+        run: ./native/build-zstd.sh ${{ matrix.triple }}
       - uses: actions/upload-artifact@v4
         with:
-          name: libbasisu-${{ matrix.triple }}
-          path: ${{ matrix.triple }}/libbasisu.a
+          name: libzstd-${{ matrix.triple }}
+          path: ${{ matrix.triple }}/libzstd.a
           if-no-files-found: error
 
       - name: Install c3c
@@ -71,18 +72,18 @@ jobs:
 
   # Intel macOS runners (macos-13) are retired and c3c ships no x86_64 mac
   # binary, so the whole macos-x64 target is cross-compiled from arm64:
-  # build-basisu.sh pins CMAKE_OSX_ARCHITECTURES/-arch and build-shared.sh
-  # passes --target. No smoke test: the runner can't execute x64 natively.
+  # build-zstd.sh pins -arch and build-shared.sh passes --target. No smoke
+  # test: the runner can't execute x64 natively.
   macos-x64:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - name: Build libbasisu.a (x86_64 cross)
-        run: ./native/build-basisu.sh macos-x64
+      - name: Build libzstd.a (x86_64 cross)
+        run: ./native/build-zstd.sh macos-x64
       - uses: actions/upload-artifact@v4
         with:
-          name: libbasisu-macos-x64
-          path: macos-x64/libbasisu.a
+          name: libzstd-macos-x64
+          path: macos-x64/libzstd.a
           if-no-files-found: error
       - name: Install c3c
         run: |
@@ -105,34 +106,26 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-      - name: Build basisu.lib (MSVC)
+      - name: Build zstd.lib (MSVC)
         shell: bash
         run: |
           set -euo pipefail
-          # Pinned commit is the single source of truth in the build script.
-          COMMIT=$(grep -oE 'BASIS_COMMIT="[0-9a-f]+"' native/build-basisu.sh | cut -d'"' -f2)
-          SRC=native/basis_universal
-          git clone --filter=blob:none https://github.com/BinomialLLC/basis_universal.git "$SRC"
-          git -C "$SRC" fetch --depth 1 origin "$COMMIT"
-          git -C "$SRC" checkout -q "$COMMIT"
-          cmake -S "$SRC" -B native/build \
-            -DCMAKE_BUILD_TYPE=Release -DBASISU_EXAMPLES=OFF -DBASISU_OPENCL=OFF -DBASISU_STATIC=ON
-          cmake --build native/build --target basisu_encoder --config Release
-          # Compile the two C-API wrappers and merge into basisu.lib. MSVC
-          # options use dash form: git-bash leaves //X args with colons
-          # unconverted (lib.exe saw '//OUT:...' and ignored it), while
-          # dash-form options are never mangled.
-          cl -nologo -O2 -MD -std:c++17 -DBASISD_SUPPORT_KTX2_ZSTD=1 \
-            -I "$SRC" -I "$SRC/encoder" -I "$SRC/transcoder" -I "$SRC/zstd" \
-            -c "$SRC/encoder/basisu_wasm_api.cpp" "$SRC/encoder/basisu_wasm_transcoder_api.cpp"
-          mkdir -p windows-x64
-          lib -nologo "-OUT:windows-x64/basisu.lib" \
-            native/build/Release/basisu_encoder.lib basisu_wasm_api.obj basisu_wasm_transcoder_api.obj
-          test -f windows-x64/basisu.lib
+          # Pinned version is the single source of truth in the build script.
+          VERSION=$(grep -oE 'ZSTD_VERSION="[0-9.]+"' native/build-zstd.sh | cut -d'"' -f2)
+          curl -fsSL "https://github.com/facebook/zstd/releases/download/v$VERSION/zstd-$VERSION.tar.gz" | tar xz -C native
+          SRC="native/zstd-$VERSION"
+          mkdir -p native/build-zstd windows-x64
+          # MSVC options in dash form: git-bash mangles //X:... arguments.
+          cl -nologo -O2 -MD -DZSTD_DISABLE_ASM -DZSTD_MULTITHREAD=0 \
+            -I "$SRC/lib" -I "$SRC/lib/common" \
+            -c "$SRC"/lib/common/*.c "$SRC"/lib/compress/*.c "$SRC"/lib/decompress/*.c \
+            -Fonative/build-zstd/
+          lib -nologo "-OUT:windows-x64/zstd.lib" native/build-zstd/*.obj
+          test -f windows-x64/zstd.lib
       - uses: actions/upload-artifact@v4
         with:
-          name: libbasisu-windows-x64
-          path: windows-x64/basisu.lib
+          name: libzstd-windows-x64
+          path: windows-x64/zstd.lib
           if-no-files-found: error
 
       - name: Install c3c
@@ -150,7 +143,7 @@ jobs:
           # the runner itself (cygpath output risks a stray \r in the arg).
           # -vv prints the linker invocation for diagnosis.
           c3c dynamic-lib src/ktx/*.c3 src/capi/*.c3 -O2 --no-headers -vv \
-            -z '${{ github.workspace }}\windows-x64\basisu.lib' -o windows-x64/ktx
+            -z '${{ github.workspace }}\windows-x64\zstd.lib' -o windows-x64/ktx
       - name: Smoke-test the C API
         shell: bash
         run: python test/capi_smoke.py windows-x64/ktx.dll

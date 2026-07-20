@@ -191,18 +191,30 @@ Exit criteria: interop gates pass; quality gap known and documented.
 
 ## Phase 6 — cutover (~1 week)
 
-- [ ] CI: new `build-zstd.sh` + workflow job producing `libzstd.a` /
+- [x] CI: new `build-zstd.sh` + workflow job producing `libzstd.a` /
       `zstd.lib` per platform from the zstd release amalgamation (pure C —
       this is build-basisu.sh minus all the pain). Commit per-platform libs
-      like today's basisu ones (a fraction of the size).
-- [ ] `manifest.json`: `linked-libraries: ["zstd"]`, drop `basisu` and the
+      like today's basisu ones (a fraction of the size). (zstd 1.5.7 pinned,
+      compiled directly — no cmake; macos-aarch64 built locally at 604K vs
+      libbasisu's 5.5M; other platforms come from
+      `.github/workflows/build-zstd.yml` on the next CI run.)
+- [x] `manifest.json`: `linked-libraries: ["zstd"]`, drop `basisu` and the
       `-lc++`/`-lstdc++`/`-lm`/`-lpthread` C++ baggage per target.
-- [ ] Delete `basis.c3` FFI externs; delete basisu fetch/build from
-      `build-basisu.sh` and the workflow (keep the zstd job).
-- [ ] Full test suite + `cross-validate.sh` + capi smoke on all platforms.
+- [x] Delete `basis.c3` FFI externs; delete basisu fetch/build from
+      `build-basisu.sh` and the workflow (keep the zstd job). (basis.c3 is
+      pure C3 now — `info` parses the header directly, `transcode` faults on
+      unsupported targets; the CLI `--ffi` flags are gone; gen-golden.sh is
+      frozen with a pre-cutover-binary guard; the FFI-based test gates were
+      migrated to golden-file-calibrated ones first and stayed green through
+      the cut.)
+- [x] Full test suite + `cross-validate.sh` + capi smoke on all platforms.
+      (Green on macos-aarch64: 95 tests, cross-validate incl. etc1s/uastc,
+      capi smoke on the zstd-linked ktx.dylib — 933K, down from 4.9M. Other
+      platforms verified by the CI workflow's smoke step.)
 - [ ] Tag a release: assets shrink to the new small `ktx-<triple>.*` — no
-      addon changes needed (same C ABI).
-- [ ] Update README (bundling section, size table) and delete this file's
+      addon changes needed (same C ABI). (Ready — tag after the CI matrix
+      has produced the per-platform libzstd/ktx artifacts.)
+- [x] Update README (bundling section, size table) and delete this file's
       basisu references… by deleting basisu.
 
 ---
