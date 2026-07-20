@@ -197,7 +197,9 @@ jobs:
       - name: Build the ktx CLI
         shell: bash
         run: |
-          c3c build ktx-windows -O2
+          # zstd.lib passed like the ktx.dll link above: absolute Windows path
+          # via -z, because -L/-l never reach lld-link as /libpath:.
+          c3c build ktx-windows -O2 -z '${{ github.workspace }}\lib\windows-x64\zstd.lib'
           mv build/ktx-windows.exe build/ktx-cli-windows-x64.exe
       - name: Smoke-test the CLI
         shell: bash
