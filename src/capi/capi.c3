@@ -11,6 +11,14 @@ import std::core::string;
 
 char[256] g_err;
 
+// FFI callers (Python executors, thread pools) invoke these entry points from
+// arbitrary threads, where C3 never auto-creates the thread-local temp
+// allocator — the first @pool()/tmem use would abort the whole host process.
+// Every exported function that allocates therefore runs inside @pool_init,
+// which creates a scoped temp allocator (and tears it down on return) no
+// matter which thread calls in. 256KB starting size; it grows on demand.
+const sz FFI_POOL_SIZE = 256 * 1024;
+
 fn void set_err(String msg) @local
 {
 	sz n = msg.len > 255 ? 255 : msg.len;
@@ -47,7 +55,7 @@ fn void ktx_free(void* p) @export("ktx_free")
 *>
 fn CInt ktx_encode(char* rgba, uint w, uint h, ZString format,
 	CInt mipmaps, CInt normal_map, CInt quality, CInt effort, CInt zstd_level,
-	char** out_data, sz* out_len) @export("ktx_encode")
+	char** out_data, sz* out_len) @export("ktx_encode") => @pool_init(mem, FFI_POOL_SIZE)
 {
 	*out_data = null;
 	*out_len = 0;
@@ -134,7 +142,7 @@ fn char[]? encode_vk(char[] pixels, uint w, uint h, uint format,
  (BC1/BC3/BC4/BC5/BC7 + uncompressed) and ETC1S/UASTC basis payloads.
 *>
 fn CInt ktx_decode(char* data, sz len, uint level, uint layer, uint face,
-	char** out_rgba, uint* out_w, uint* out_h) @export("ktx_decode")
+	char** out_rgba, uint* out_w, uint* out_h) @export("ktx_decode") => @pool_init(mem, FFI_POOL_SIZE)
 {
 	*out_rgba = null;
 	*out_w = 0;
