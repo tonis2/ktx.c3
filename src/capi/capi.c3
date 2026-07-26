@@ -137,6 +137,111 @@ fn char[]? encode_vk(char[] pixels, uint w, uint h, uint format,
 }
 
 <*
+ Encode six RGBA8 cube faces into one KTX2 cubemap blob.
+
+ `faces` is an array of six pointers in KTX face order (+X -X +Y -Y +Z -Z),
+ each holding size*size*4 bytes. Every other argument means what it does in
+ ktx_encode. The result has faceCount 6, so it satisfies consumers that
+ require a cubemap texture type (glTF KHR_environment_map, for one).
+*>
+fn CInt ktx_encode_cube(char** faces, uint size, ZString format,
+	CInt mipmaps, CInt normal_map, CInt quality, CInt effort, CInt zstd_level,
+	char** out_data, sz* out_len) @export("ktx_encode_cube") => @pool_init(mem, FFI_POOL_SIZE)
+{
+	*out_data = null;
+	*out_len = 0;
+	if (!faces || size == 0)
+	{
+		set_err("bad arguments: null faces or zero size");
+		return 1;
+	}
+	char[][6] imgs;
+	for (uint f = 0; f < 6; ++f)
+	{
+		if (!faces[f])
+		{
+			set_err("bad arguments: null cube face");
+			return 1;
+		}
+		imgs[f] = faces[f][:(sz)size * size * 4];
+	}
+	String name = format.str_view();
+
+	uint bfmt;
+	bool bsrgb;
+	if (codec::is_basis_format(name, &bfmt, &bsrgb))
+	{
+		basis::EncodeOptions opts = { .quality = quality, .effort = effort, .srgb = bsrgb, .mipmaps = mipmaps != 0 };
+		char[]? blob = basis::encode(mem, bfmt, imgs[..], size, size, basis::TexType.CUBE, opts);
+		if (catch err = blob)
+		{
+			set_fault("basis encode", err);
+			return 1;
+		}
+		*out_data = blob.ptr;
+		*out_len = blob.len;
+		return 0;
+	}
+
+	uint? vkfmt = codec::parse_format(name);
+	if (catch err = vkfmt)
+	{
+		set_fault("unknown format", err);
+		return 1;
+	}
+	char[]? blob = encode_vk_cube(imgs[..], size, vkfmt, mipmaps != 0, normal_map != 0, zstd_level);
+	if (catch err = blob)
+	{
+		set_fault("encode", err);
+		return 1;
+	}
+	*out_data = blob.ptr;
+	*out_len = blob.len;
+	return 0;
+}
+
+<*
+ Cubemap twin of encode_vk. Each face carries its own mip chain — filtering
+ stops at the face edge rather than reaching across the seam, which is what
+ every other offline encoder does at this quality level.
+*>
+fn char[]? encode_vk_cube(char[][] imgs, uint size, uint format,
+	bool mipmaps, bool normal_map, CInt zstd_level) @local => @pool()
+{
+	vk::FormatInfo fi = vk::info(format)!;
+	uint levels = mipmaps ? mipgen::chain_length(size, size) : 1;
+	container::Texture tex = container::create(mem, {
+		.vk_format = format,
+		.width = size,
+		.height = size,
+		.face_count = 6,
+		.level_count = levels,
+	})!;
+	defer tex.free();
+
+	mipgen::Options mip_opts = { .srgb = fi.srgb, .renormalize = normal_map };
+	char[][6] rgba;
+	for (uint f = 0; f < 6; ++f) rgba[f] = imgs[f];
+	uint lw = size;
+	for (uint l = 0; l < levels; ++l)
+	{
+		if (l > 0)
+		{
+			for (uint f = 0; f < 6; ++f) rgba[f] = mipgen::next_level(tmem, rgba[f], lw, lw, mip_opts);
+			lw = max(lw >> 1, 1u);
+		}
+		for (uint f = 0; f < 6; ++f)
+		{
+			char[] encoded = codec::encode_image(tmem, format, rgba[f], lw, lw)!;
+			tex.set_image(l, 0, f, encoded)!;
+		}
+	}
+
+	container::Scheme scheme = zstd_level < 0 ? container::Scheme.NONE : container::Scheme.ZSTD;
+	return container::write(mem, &tex, { .scheme = scheme, .zstd_level = zstd_level > 0 ? zstd_level : 0 });
+}
+
+<*
  Decode one image (level/layer/face) of a KTX2 blob to RGBA8 (w*h*4 bytes,
  written to out_rgba/out_w/out_h). Handles both the VkFormat container path
  (BC1/BC3/BC4/BC5/BC7 + uncompressed) and ETC1S/UASTC basis payloads.
