@@ -263,11 +263,24 @@ fn void encode_row(void* ctx, usz by) @private
 	}
 }
 
+// A decoded block costs roughly a tenth of a microsecond and a spawned thread
+// tens of one, so a thread has to be handed a thousand blocks before it pays for
+// itself. Chosen against the sizes an import actually meets: a 256x256 level and
+// up spreads across cores (2.4x there, 7x at 2048x2048), a 128x128 one runs
+// inline and is not made slower by asking.
+const usz MIN_BLOCKS_PER_THREAD @local = 1024;
+
 <*
  Decode BC7 blocks to a tightly packed RGBA8 image. blocks.len must equal
  encoded_size(width, height); partial edge blocks are clipped.
+
+ Block rows are decoded on `threads` threads (0 = as many as the work is worth,
+ 1 = inline), the same split `encode` uses and safe for the same reason: a row
+ owns its band of `out` and reads nothing another row writes, so the result is
+ identical for any thread count. Unlike an encode, a small image asking for 0
+ gets one thread — see `parallel::shares`.
 *>
-fn char[]? decode(Allocator allocator, char[] blocks, uint width, uint height)
+fn char[]? decode(Allocator allocator, char[] blocks, uint width, uint height, uint threads = 0)
 {
 	if (blocks.len != encoded_size(width, height)) return INVALID_SIZE~;
 	if (width == 0 || height == 0)
@@ -278,29 +291,43 @@ fn char[]? decode(Allocator allocator, char[] blocks, uint width, uint height)
 	char[] out = alloc::new_array(allocator, char, (sz)width * (sz)height * 4);
 	uint bw = (width + 3) / 4;
 	uint bh = (height + 3) / 4;
+	DecodeJob job = { .blocks = blocks, .out = out, .width = width, .height = height, .bw = bw };
+	parallel::run(bh, &job, &decode_row, parallel::shares((usz)bw * bh, MIN_BLOCKS_PER_THREAD, threads));
+	return out;
+}
+
+struct DecodeJob @private
+{
+	char[] blocks;
+	char[] out;
+	uint width;
+	uint height;
+	uint bw;
+}
+
+fn void decode_row(void* ctx, usz by) @private
+{
+	DecodeJob* j = (DecodeJob*)ctx;
 	char[64] px;
-	for (uint by = 0; by < bh; by++)
+	uint row = (uint)by;
+	uint ymax = math::min(4u, j.height - row * 4);
+	for (uint bx = 0; bx < j.bw; bx++)
 	{
-		for (uint bx = 0; bx < bw; bx++)
+		decode_block(j.blocks.ptr + ((sz)by * (sz)j.bw + (sz)bx) * 16, &px[0]);
+		uint xmax = math::min(4u, j.width - bx * 4);
+		for (uint y = 0; y < ymax; y++)
 		{
-			decode_block(blocks.ptr + ((sz)by * (sz)bw + (sz)bx) * 16, &px[0]);
-			uint ymax = math::min(4u, height - by * 4);
-			uint xmax = math::min(4u, width - bx * 4);
-			for (uint y = 0; y < ymax; y++)
+			for (uint x = 0; x < xmax; x++)
 			{
-				for (uint x = 0; x < xmax; x++)
-				{
-					sz dst = ((sz)(by * 4 + y) * (sz)width + (sz)(bx * 4 + x)) * 4;
-					uint src = (y * 4 + x) * 4;
-					out[dst] = px[src];
-					out[dst + 1] = px[src + 1];
-					out[dst + 2] = px[src + 2];
-					out[dst + 3] = px[src + 3];
-				}
+				sz dst = ((sz)(row * 4 + y) * (sz)j.width + (sz)(bx * 4 + x)) * 4;
+				uint src = (y * 4 + x) * 4;
+				j.out[dst] = px[src];
+				j.out[dst + 1] = px[src + 1];
+				j.out[dst + 2] = px[src + 2];
+				j.out[dst + 3] = px[src + 3];
 			}
 		}
 	}
-	return out;
 }
 
 // ---------------------------------------------------------------------------
