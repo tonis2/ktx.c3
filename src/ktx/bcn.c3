@@ -84,49 +84,75 @@ fn void encode_row(void* ctx, usz by) @private
 	}
 }
 
+// BC1/BC4 interpolants are a handful of integer ops per texel — around a third
+// of a BC7 block's unpack cost — so a thread needs a correspondingly bigger
+// share before it earns its spawn. See parallel::shares and bc7's twin of this.
+const usz MIN_BLOCKS_PER_THREAD @local = 4096;
+
 <*
  Decode row-major 4x4 blocks back to tightly-packed RGBA8.
  blocks.len must equal encoded_size(fmt, width, height); block texels that
  fall outside width/height are clipped. Output per format:
  BC1 -> (r,g,b,255) in 4-color mode, punchthrough texels give (0,0,0,0);
  BC3 -> (r,g,b,a); BC4 -> (r,r,r,255); BC5 -> (r,g,0,255).
+
+ Block rows are decoded on `threads` threads (0 = as many as the work is worth,
+ 1 = inline), the same split `encode` uses — each row owns its band of the
+ output, so the result is identical for any thread count. These blocks unpack
+ more cheaply than BC7's, so the share a thread must be given to be worth
+ spawning is larger.
 *>
-fn char[]? decode(Allocator allocator, BcnFormat fmt, char[] blocks, uint width, uint height)
+fn char[]? decode(Allocator allocator, BcnFormat fmt, char[] blocks, uint width, uint height, uint threads = 0)
 {
 	if (width == 0 || height == 0) return INVALID_SIZE~;
 	if (blocks.len != encoded_size(fmt, width, height)) return INVALID_INPUT~;
 
 	char[] out = alloc::new_array(allocator, char, (sz)width * height * 4);
-	sz bb = block_bytes(fmt);
 	uint bx_count = (width + 3) / 4;
 	uint by_count = (height + 3) / 4;
-
-	char[64] px;
-	for (uint by = 0; by < by_count; by++)
-	{
-		for (uint bx = 0; bx < bx_count; bx++)
-		{
-			char* src = &blocks[((sz)by * bx_count + bx) * bb];
-			switch (fmt)
-			{
-				case BC1:
-					decode_bc1_block(src, &px);
-				case BC3:
-					decode_bc1_block(src + 8, &px);
-					decode_bc4_block(src, 3, &px);
-				case BC4:
-					fill_default(&px);
-					decode_bc4_block(src, 0, &px);
-					copy_r_to_gb(&px);
-				case BC5:
-					fill_default(&px);
-					decode_bc4_block(src, 0, &px);
-					decode_bc4_block(src + 8, 1, &px);
-			}
-			store_block(out, width, height, bx * 4, by * 4, &px);
-		}
-	}
+	DecodeJob job = { .blocks = blocks, .out = out, .fmt = fmt, .width = width, .height = height,
+		.bx_count = bx_count, .bb = block_bytes(fmt) };
+	parallel::run((usz)by_count, &job, &decode_row,
+		parallel::shares((usz)bx_count * by_count, MIN_BLOCKS_PER_THREAD, threads));
 	return out;
+}
+
+struct DecodeJob @private
+{
+	char[] blocks;
+	char[] out;
+	BcnFormat fmt;
+	uint width;
+	uint height;
+	uint bx_count;
+	sz bb;
+}
+
+fn void decode_row(void* ctx, usz by) @private
+{
+	DecodeJob* j = (DecodeJob*)ctx;
+	char[64] px;
+	for (uint bx = 0; bx < j.bx_count; bx++)
+	{
+		char* src = &j.blocks[((sz)by * j.bx_count + bx) * j.bb];
+		switch (j.fmt)
+		{
+			case BC1:
+				decode_bc1_block(src, &px);
+			case BC3:
+				decode_bc1_block(src + 8, &px);
+				decode_bc4_block(src, 3, &px);
+			case BC4:
+				fill_default(&px);
+				decode_bc4_block(src, 0, &px);
+				copy_r_to_gb(&px);
+			case BC5:
+				fill_default(&px);
+				decode_bc4_block(src, 0, &px);
+				decode_bc4_block(src + 8, 1, &px);
+		}
+		store_block(j.out, j.width, j.height, bx * 4, (uint)by * 4, &px);
+	}
 }
 
 // ---------------------------------------------------------------------------

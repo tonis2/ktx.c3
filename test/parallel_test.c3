@@ -1,7 +1,7 @@
 // Threading tests: ktx::parallel covers every item exactly once, and the
-// threaded codec paths (uastc/etc1s/bc7/bcn encode, uastc decode) produce
-// byte-identical output for any thread count — the searches are parallel but
-// all order-sensitive accumulation stays serial by design.
+// threaded codec paths (uastc/etc1s/bc7/bcn encode, uastc/bc7/bcn decode)
+// produce byte-identical output for any thread count — the searches are
+// parallel but all order-sensitive accumulation stays serial by design.
 module parallel_testutil;
 import ktx::etc1s;
 
@@ -93,4 +93,47 @@ fn void bcn_encode_thread_deterministic() => @pool()
 	char[] b3one = bcn::encode(tmem, bcn::BcnFormat.BC3, img, 70, 54, 1)!!;
 	char[] b3four = bcn::encode(tmem, bcn::BcnFormat.BC3, img, 70, 54, 4)!!;
 	assert(parallel_testutil::same(b3one, b3four), "bc3 encode differs across thread counts");
+}
+
+fn void bcn_decode_thread_deterministic() => @pool()
+{
+	// The decoders split by block row exactly as the encoders do, and 70x54 is
+	// the size that would catch it if a partial edge block were assigned by
+	// anything other than its own row: 18x14 blocks, clamped on both axes.
+	char[] img = etc1s_enc_testutil::make_image(tmem, 70, 54);
+
+	char[] b7 = bc7::encode(tmem, img, 70, 54, true)!!;
+	char[] one = bc7::decode(tmem, b7, 70, 54, 1)!!;
+	char[] four = bc7::decode(tmem, b7, 70, 54, 4)!!;
+	assert(parallel_testutil::same(one, four), "bc7 decode differs across thread counts");
+
+	bcn::BcnFormat[4] formats = { bcn::BcnFormat.BC1, bcn::BcnFormat.BC3, bcn::BcnFormat.BC4, bcn::BcnFormat.BC5 };
+	foreach (i, fmt : formats)
+	{
+		char[] blocks = bcn::encode(tmem, fmt, img, 70, 54)!!;
+		char[] serial = bcn::decode(tmem, fmt, blocks, 70, 54, 1)!!;
+		char[] threaded = bcn::decode(tmem, fmt, blocks, 70, 54, 4)!!;
+		assert(parallel_testutil::same(serial, threaded), "bcn decode differs across thread counts (format %d)", i);
+	}
+}
+
+<*
+ The automatic thread count is capped by the work, not only by the core count.
+
+ A mip chain is mostly small levels, and a 4x4 one handed sixteen threads spends
+ all of its time in `pthread_create`. `shares` is what keeps that from happening
+ and this is the guard on it — an explicit count still means what it says.
+*>
+fn void shares_scales_with_the_work()
+{
+	assert(parallel::shares(0, 1024) == 1, "nothing to do still asked for threads");
+	assert(parallel::shares(1023, 1024) == 1, "under one share was split");
+	assert(parallel::shares(2047, 1024) == 1, "under two shares was split");
+	// Capped by the work rather than only by the cores — asserted as a bound
+	// and a monotonicity, so a single-core machine reads it the same way.
+	assert(parallel::shares(2048, 1024) <= 2, "two shares got more than two threads");
+	assert(parallel::shares(1024 * 1024, 1024) >= parallel::shares(2048, 1024), "more work got fewer threads");
+	// An explicit request is passed through in both directions.
+	assert(parallel::shares(4, 1024, 8) == 8, "an explicit count was overridden");
+	assert(parallel::shares(1024 * 1024, 1024, 1) == 1, "threads 1 was not honoured");
 }
