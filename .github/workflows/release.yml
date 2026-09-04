@@ -1,14 +1,16 @@
-# On every v* tag: rebuild all native libs (via build-zstd.yml) and attach
-# them to the tag's GitHub release as raw files — no archives — so consumers
-# can fetch a single lib directly, e.g. the Blender glTF addon downloading
-# only the library matching the user's OS:
+# On every v* tag: build the shared libs and CLIs (via build-native.yml) and
+# attach them to the tag's GitHub release as raw files — no archives — so
+# consumers can fetch a single file directly, e.g. the Blender glTF addon
+# downloading only the library matching the user's OS:
 #   https://github.com/<repo>/releases/latest/download/ktx-<triple>.<ext>
 #
 # Asset names embed the target triple because release assets share one flat
 # namespace (two platforms both produce a "ktx.so"/"ktx.dylib"):
 #   ktx-<triple>.{so,dylib,dll}  ktx-windows-x64.lib (import lib)
-#   libzstd-<triple>.a           zstd-windows-x64.lib
 #   ktx-cli-<triple>[.exe]       standalone CLI binaries
+#
+# zstd is not published here: lib/<triple>/{libzstd.a,zstd.lib} are committed
+# for c3l consumers, and the shared libs/CLIs above already link it statically.
 name: release
 
 on:
@@ -20,7 +22,7 @@ permissions:
 
 jobs:
   build:
-    uses: ./.github/workflows/build-zstd.yml
+    uses: ./.github/workflows/build-native.yml
 
   publish:
     needs: build
@@ -34,10 +36,10 @@ jobs:
           set -euo pipefail
           mkdir -p release
           for dir in artifacts/*/; do
-            name=$(basename "$dir")               # libzstd-<triple> | libktx-<triple> | ktxcli-<triple>
-            triple=${name#libzstd-}; triple=${triple#libktx-}; triple=${triple#ktxcli-}
+            name=$(basename "$dir")               # libktx-<triple> | ktxcli-<triple>
+            triple=${name#libktx-}; triple=${triple#ktxcli-}
             for f in "$dir"*; do
-              base=$(basename "$f")               # e.g. ktx.dylib, libzstd.a, ktx-cli-<triple>
+              base=$(basename "$f")               # e.g. ktx.dylib, ktx-cli-<triple>
               if [[ "$base" == *"$triple"* ]]; then
                 cp "$f" "release/$base"           # already carries the triple (CLI binaries)
               else

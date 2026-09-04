@@ -194,7 +194,10 @@ release into `native/` (gitignored):
 native/build-zstd.sh    # -> lib/<target>/libzstd.a
 ```
 
-CI builds every platform this way via `.github/workflows/build-zstd.yml`.
+The archives are committed, so this is a rare, manual step — everything else
+(CI included) links the committed ones. `.github/workflows/zstd.yml` runs the
+script for every platform on manual dispatch; download its artifacts and commit
+them over `lib/<triple>/` (windows-x64's `zstd.lib` can only be built there).
 
 ## Releases: prebuilt shared libraries for FFI
 
@@ -209,9 +212,11 @@ named per target:
 ```
 ktx-macos-aarch64.dylib   ktx-macos-x64.dylib
 ktx-linux-x64.so          ktx-windows-x64.dll   ktx-windows-x64.lib
-libzstd-<triple>.a        zstd-windows-x64.lib
 ktx-cli-<triple>          ktx-cli-windows-x64.exe
 ```
+
+(`libzstd` is not a release asset: it is committed under `lib/<triple>/` for
+c3l consumers, and the libs and CLIs above link it statically.)
 
 so a consumer can fetch exactly one file, e.g.
 `https://github.com/tonis2/ktx.c3/releases/latest/download/ktx-macos-aarch64.dylib`.
