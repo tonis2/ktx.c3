@@ -1,19 +1,19 @@
 # Builds the native artifacts every platform needs and uploads them as run
 # artifacts. release.yml calls this workflow on version tags and attaches the
 # same artifacts to the GitHub release (raw files, uniquely named):
-#   - libzstd.a / zstd.lib — the bundled zstd static lib (the library's only
-#     native dependency since the pure-C3 basis rewrite), linked by the
-#     ktx.c3l manifest.
 #   - ktx.so / ktx.dylib / ktx.dll — the libktx shared library (C API in
 #     src/capi) for FFI consumers, e.g. the Blender glTF exporter addon.
 #   - ktx-cli-<triple>[.exe] — the standalone ktx CLI (create/extract/info),
 #     ready to download and run.
 #
-# zstd is NOT vendored; each runner fetches the pinned release tarball via
-# native/build-zstd.sh. c3c is installed from its release archives. There is
-# no linux-aarch64 or x86_64 macOS c3c release binary: linux-aarch64 gets no
-# shared lib for now, and the macos-x64 dylib is cross-compiled from the arm64
-# runner.
+# zstd — the library's only native dependency since the pure-C3 basis rewrite —
+# is NOT built here: lib/<triple>/{libzstd.a,zstd.lib} are committed and are
+# what the ktx.c3l manifest links, so linking them here builds exactly what
+# consumers get. Rebuilding them is a separate manual job (zstd.yml).
+#
+# c3c is installed from its release archives. There is no linux-aarch64 or
+# x86_64 macOS c3c release binary: linux-aarch64 gets no build for now, and the
+# macos-x64 artifacts are cross-compiled from the arm64 runner.
 name: build-native
 
 env:
@@ -24,11 +24,12 @@ on:
   workflow_call:      # release.yml reuses the whole build matrix on v* tags
   push:
     paths:
-      - native/build-zstd.sh
       - native/build-shared.sh
       - src/ktx/**
       - src/capi/**
-      - .github/workflows/build-zstd.yml
+      - lib/*/libzstd.a
+      - lib/*/zstd.lib
+      - .github/workflows/build-native.yml
 
 jobs:
   unix:
@@ -36,24 +37,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,         triple: macos-aarch64, c3c: c3-macos.zip,     cli: ktx }
-          - { os: ubuntu-latest,    triple: linux-x64,     c3c: c3-linux.tar.gz, cli: ktx-linux }
-          - { os: ubuntu-24.04-arm, triple: linux-aarch64 }           # no linux-aarch64 c3c release
+          - { os: macos-14,      triple: macos-aarch64, c3c: c3-macos.zip,    cli: ktx }
+          - { os: ubuntu-latest, triple: linux-x64,     c3c: c3-linux.tar.gz, cli: ktx-linux }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive            # getopt.c3l + image.c3l for the CLI build
-      - name: Build libzstd.a
-        run: ./native/build-zstd.sh ${{ matrix.triple }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: libzstd-${{ matrix.triple }}
-          path: lib/${{ matrix.triple }}/libzstd.a
-          if-no-files-found: error
-
       - name: Install c3c
-        if: matrix.c3c
         run: |
           curl -fsSL -o /tmp/c3c-dist "https://github.com/c3lang/c3c/releases/download/${C3C_RELEASE}/${{ matrix.c3c }}"
           case "${{ matrix.c3c }}" in
@@ -62,30 +53,24 @@ jobs:
           esac
           echo "$HOME/c3" >> "$GITHUB_PATH"
       - name: Build libktx shared library
-        if: matrix.c3c
         run: ./native/build-shared.sh ${{ matrix.triple }}
       - name: Smoke-test the C API
-        if: matrix.c3c
         run: python3 test/capi_smoke.py ${{ matrix.triple }}/ktx.*
       - uses: actions/upload-artifact@v4
-        if: matrix.c3c
         with:
           name: libktx-${{ matrix.triple }}
           path: ${{ matrix.triple }}/ktx.*
           if-no-files-found: error
 
       - name: Build the ktx CLI
-        if: matrix.cli
         run: |
           c3c build ${{ matrix.cli }} -O2
           mv "build/${{ matrix.cli }}" "build/ktx-cli-${{ matrix.triple }}"
       - name: Smoke-test the CLI
-        if: matrix.cli
         run: |
           ./build/ktx-cli-${{ matrix.triple }} create -f etc1s -o /tmp/cli-smoke.ktx2 test/images/detail.png
           ./build/ktx-cli-${{ matrix.triple }} info /tmp/cli-smoke.ktx2
       - uses: actions/upload-artifact@v4
-        if: matrix.cli
         with:
           name: ktxcli-${{ matrix.triple }}
           path: build/ktx-cli-${{ matrix.triple }}
@@ -93,21 +78,14 @@ jobs:
 
   # Intel macOS runners (macos-13) are retired and c3c ships no x86_64 mac
   # binary, so the whole macos-x64 target is cross-compiled from arm64:
-  # build-zstd.sh pins -arch and build-shared.sh passes --target. No smoke
-  # test: the runner can't execute x64 natively.
+  # build-shared.sh passes --target and the committed lib/macos-x64/libzstd.a
+  # is already an x86_64 archive. No smoke test: the runner can't execute x64.
   macos-x64:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Build libzstd.a (x86_64 cross)
-        run: ./native/build-zstd.sh macos-x64
-      - uses: actions/upload-artifact@v4
-        with:
-          name: libzstd-macos-x64
-          path: lib/macos-x64/libzstd.a
-          if-no-files-found: error
       - name: Install c3c
         run: |
           curl -fsSL -o /tmp/c3-macos.zip "https://github.com/c3lang/c3c/releases/download/${C3C_RELEASE}/c3-macos.zip"
@@ -136,37 +114,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      # Puts cl/lib on PATH (vcvarsall); bash steps don't get the MSVC env otherwise.
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      - name: Build zstd.lib (MSVC)
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Pinned version is the single source of truth in the build script.
-          VERSION=$(grep -oE 'ZSTD_VERSION="[0-9.]+"' native/build-zstd.sh | cut -d'"' -f2)
-          # Extract only lib/ — the tarball's tests/ contains symlinks that
-          # Windows tar cannot create (exit 2 under pipefail).
-          curl -fsSL "https://github.com/facebook/zstd/releases/download/v$VERSION/zstd-$VERSION.tar.gz" | tar xz -C native "zstd-$VERSION/lib"
-          SRC="native/zstd-$VERSION"
-          mkdir -p native/build-zstd windows-x64 lib/windows-x64
-          # MSVC options in dash form: git-bash mangles //X:... arguments.
-          # -GS- because /GS-compiled objects reference __report_gsfailure,
-          # whose CRT definition collides with the stub c3c's runtime ships
-          # when lld-link builds ktx.dll against this archive.
-          cl -nologo -O2 -MD -GS- -DZSTD_DISABLE_ASM -DZSTD_MULTITHREAD=0 \
-            -I "$SRC/lib" -I "$SRC/lib/common" \
-            -c "$SRC"/lib/common/*.c "$SRC"/lib/compress/*.c "$SRC"/lib/decompress/*.c \
-            -Fonative/build-zstd/
-          lib -nologo "-OUT:lib/windows-x64/zstd.lib" native/build-zstd/*.obj
-          test -f lib/windows-x64/zstd.lib
-      - uses: actions/upload-artifact@v4
-        with:
-          name: libzstd-windows-x64
-          path: lib/windows-x64/zstd.lib
-          if-no-files-found: error
-
       - name: Install c3c
         shell: bash
         run: |
@@ -176,7 +123,6 @@ jobs:
       - name: Build ktx.dll
         shell: bash
         run: |
-          ls -la windows-x64/
           # c3c's -L/-l don't reach lld-link as /libpath:, and lld-link runs
           # from its own cwd — pass a Windows-style absolute path expanded by
           # the runner itself (cygpath output risks a stray \r in the arg).

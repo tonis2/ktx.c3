@@ -1,0 +1,44 @@
+# Rebuilds the bundled zstd static libs for every platform. Manual only: the
+# archives are committed under lib/<triple>/ and are the artifact consumers
+# link (see manifest.json), so they change only when native/build-zstd.sh
+# bumps ZSTD_VERSION or a platform is added — everything else in CI links the
+# committed ones.
+#
+# Run this from the Actions tab, download the run's artifacts and commit them
+# over lib/<triple>/. windows-x64 can only be produced here (MSVC).
+name: build-zstd
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - native/build-zstd.sh
+      - .github/workflows/zstd.yml
+
+jobs:
+  zstd:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,      triple: macos-aarch64, lib: libzstd.a }
+          - { os: macos-14,      triple: macos-x64,     lib: libzstd.a }   # cross-compiled: -arch x86_64
+          - { os: ubuntu-latest, triple: linux-x64,     lib: libzstd.a }
+          - { os: ubuntu-24.04-arm, triple: linux-aarch64, lib: libzstd.a }
+          - { os: windows-latest, triple: windows-x64,  lib: zstd.lib }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Puts cl/lib on PATH (vcvarsall); bash steps don't get the MSVC env otherwise.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.triple == 'windows-x64'
+        with:
+          arch: x64
+      - name: Build ${{ matrix.lib }}
+        shell: bash
+        run: ./native/build-zstd.sh ${{ matrix.triple }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zstd-${{ matrix.triple }}
+          path: lib/${{ matrix.triple }}/${{ matrix.lib }}
+          if-no-files-found: error
