@@ -225,8 +225,13 @@ fn sz encoded_size(uint width, uint height)
  If has_alpha is false the alpha channel of the input is ignored and the
  image is encoded as opaque. Non-multiple-of-4 dimensions are handled by
  replicating edge pixels into partial blocks.
+
+ `fast` stops after mode 6 instead of also trying mode 1 or mode 5, which is
+ roughly five times quicker. It is meant for a source that has already been
+ quantised — transcoding an ETC1S or UASTC texture, where the two-subset modes
+ have nothing left to recover — and not for encoding full-precision pixels.
 *>
-fn char[]? encode(Allocator allocator, char[] rgba, uint width, uint height, bool has_alpha = true, uint threads = 0)
+fn char[]? encode(Allocator allocator, char[] rgba, uint width, uint height, bool has_alpha = true, uint threads = 0, bool fast = false)
 {
 	if (rgba.len != (sz)width * (sz)height * 4) return INVALID_SIZE~;
 	if (width == 0 || height == 0)
@@ -237,7 +242,7 @@ fn char[]? encode(Allocator allocator, char[] rgba, uint width, uint height, boo
 	char[] out = alloc::new_array(allocator, char, encoded_size(width, height));
 	uint bw = (width + 3) / 4;
 	uint bh = (height + 3) / 4;
-	EncodeJob job = { .rgba = rgba, .out = out, .width = width, .height = height, .bw = bw, .has_alpha = has_alpha };
+	EncodeJob job = { .rgba = rgba, .out = out, .width = width, .height = height, .bw = bw, .has_alpha = has_alpha, .fast = fast };
 	parallel::run(bh, &job, &encode_row, threads);
 	return out;
 }
@@ -250,6 +255,7 @@ struct EncodeJob @private
 	uint height;
 	uint bw;
 	bool has_alpha;
+	bool fast;
 }
 
 fn void encode_row(void* ctx, usz by) @private
@@ -259,7 +265,7 @@ fn void encode_row(void* ctx, usz by) @private
 	for (uint bx = 0; bx < j.bw; bx++)
 	{
 		extract_block(j.rgba, j.width, j.height, bx, (uint)by, j.has_alpha, &px[0]);
-		encode_block(&px[0], j.out.ptr + (by * j.bw + bx) * 16);
+		encode_block(&px[0], j.out.ptr + (by * j.bw + bx) * 16, j.fast);
 	}
 }
 
@@ -684,7 +690,7 @@ fn ulong block_sse(char* a, char* b) @private
  for blocks with non-opaque alpha. The winner is picked by squared error
  against the actual decoded block.
 *>
-fn void encode_block(char* px, char* dst)
+fn void encode_block(char* px, char* dst, bool fast = false)
 {
 	bool opaque = true;
 	for (uint i = 0; i < 16; i++)
@@ -704,6 +710,8 @@ fn void encode_block(char* px, char* dst)
 	ulong best_err = block_sse(px, &dec[0]);
 	for (uint i = 0; i < 16; i++) dst[i] = cand[i];
 	if (best_err == 0) return;
+	// Mode 6 alone, for a caller whose source is already block-quantised.
+	if (fast) return;
 
 	char[16] cand2;
 	if (opaque)
