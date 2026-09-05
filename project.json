@@ -43,7 +43,7 @@
       "linked-libraries": [ "zstd" ],
       "linker-search-paths": [ "lib/macos-x64" ]
     },
-    // No linked-libraries here: CI links zstd.lib via -z (see build-zstd.yml).
+    // No linked-libraries here: CI links zstd.lib via -z (see build-native.yml).
     "ktx-windows": {
       "type": "executable"
     }
