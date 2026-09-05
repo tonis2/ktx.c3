@@ -197,7 +197,7 @@ Exit criteria: interop gates pass; quality gap known and documented.
       like today's basisu ones (a fraction of the size). (zstd 1.5.7 pinned,
       compiled directly — no cmake; macos-aarch64 built locally at 604K vs
       libbasisu's 5.5M; other platforms come from
-      `.github/workflows/build-zstd.yml` on the next CI run.)
+      `.github/workflows/zstd.yml` on the next CI run.)
 - [x] `manifest.json`: `linked-libraries: ["zstd"]`, drop `basisu` and the
       `-lc++`/`-lstdc++`/`-lm`/`-lpthread` C++ baggage per target.
 - [x] Delete `basis.c3` FFI externs; delete basisu fetch/build from
