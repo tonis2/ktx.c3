@@ -44,7 +44,7 @@ fn char[] etc1s_bytes(Allocator allocator, char[] rgba, uint w, uint h, uint thr
 
 module parallel_tests @test;
 import ktx::parallel, ktx::uastc, ktx::bc7, ktx::bcn, ktx::etc1s;
-import ktx::uastc_bc7, ktx::etc1s_bc7;
+import ktx::uastc_bc7, ktx::etc1s_bc7, ktx::mipgen;
 import parallel_testutil, etc1s_enc_testutil;
 
 fn void run_covers_every_item_once()
@@ -95,6 +95,17 @@ fn void bcn_encode_thread_deterministic() => @pool()
 	char[] b3one = bcn::encode(tmem, bcn::BcnFormat.BC3, img, 70, 54, 1)!!;
 	char[] b3four = bcn::encode(tmem, bcn::BcnFormat.BC3, img, 70, 54, 4)!!;
 	assert(parallel_testutil::same(b3one, b3four), "bc3 encode differs across thread counts");
+}
+
+fn void mipgen_thread_deterministic() => @pool()
+{
+	// Large enough that the rows actually spawn: `next_level` runs inline below a
+	// few thousand output pixels, and 512x256 gives it 32768 of them.
+	char[] img = etc1s_enc_testutil::make_image(tmem, 512, 256);
+	mipgen::Options opts = { .srgb = true, .renormalize = false };
+	char[] one = mipgen::next_level(tmem, img, 512, 256, opts, 1);
+	char[] four = mipgen::next_level(tmem, img, 512, 256, opts, 4);
+	assert(parallel_testutil::same(one, four), "mipgen differs across thread counts");
 }
 
 fn void bcn_decode_thread_deterministic() => @pool()
