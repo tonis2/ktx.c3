@@ -8,6 +8,7 @@
 // regenerate from the pre-cutover revision).
 module ktx::basis;
 import ktx::container, ktx::dfd, ktx::util, ktx::uastc, ktx::etc1s, ktx::bc7, ktx::bcn, ktx::mipgen;
+import ktx::uastc_bc7, ktx::etc1s_bc7;
 import std::core::mem;
 
 faultdef ENCODE_FAILED, OPEN_FAILED, TRANSCODE_FAILED, UNSUPPORTED_TARGET;
@@ -364,105 +365,97 @@ fn uint dfd_model(char[] ktx2) @local
 	return info.model;
 }
 
-<*
- Pure-C3 RGBA32 transcode of one image of a UASTC KTX2 blob
- (docs/basis-rewrite.md phase 1): container read (undoing Zstd
- supercompression) -> per-block UASTC decode. Bit-exact with basisu's
- transcoder, which test/uastc_test.c3 checks against golden dumps.
-*>
-fn Transcoded? transcode_uastc_rgba32(Allocator allocator, char[] ktx2, uint level, uint layer, uint face) @local => @pool()
+struct UastcImage @local
 {
-	container::Texture tex = container::read(tmem, ktx2)!;
+	char[] blocks;
+	uint width;
+	uint height;
+}
+
+<*
+ One image's UASTC block payload out of a container already read. vkFormat is
+ 0 on a basis file, so Texture.image() cannot size the images itself and the
+ level is sliced by block count instead.
+*>
+fn UastcImage? uastc_slice(container::Texture* tex, uint level, uint layer, uint face) @local
+{
 	if (level >= tex.level_count()) return TRANSCODE_FAILED~;
 	if (layer >= tex.layers() || face >= tex.face_count) return TRANSCODE_FAILED~;
 
 	uint w = tex.level_width(level);
 	uint h = tex.level_height(level);
-	// vkFormat is 0 for basis files, so Texture.image() can't size the images;
-	// slice the level payload by block count directly.
 	usz img_size = (usz)((w + 3) / 4) * (usz)((h + 3) / 4) * 16;
 	usz offset = ((usz)layer * tex.face_count + face) * img_size;
 	char[] level_data = tex.levels[level];
 	if (offset + img_size > level_data.len) return TRANSCODE_FAILED~;
+	return { .blocks = level_data[offset:img_size], .width = w, .height = h };
+}
 
-	char* buf = alloc::malloc(allocator, (sz)((usz)w * h * 4));
-	char[] rgba = buf[:(usz)w * h * 4];
-	if (catch err = uastc::decode_image(level_data[offset:img_size], rgba, w, h))
+<*
+ One UASTC image at the given target. RGBA32 is the phase-1 per-block decode,
+ bit-exact with basisu's transcoder (test/uastc_test.c3 pins it against golden
+ dumps); BC7 is the block mapper; BC1/BC3 decode and re-encode.
+*>
+fn Transcoded? uastc_to(Allocator allocator, UastcImage img, uint tf_format, uint threads = 0) @local => @pool()
+{
+	if (tf_format == TF_BC7_RGBA)
 	{
-		alloc::free(allocator, buf);
+		char[] blocks = uastc_bc7::map_image(allocator, img.blocks, img.width, img.height, threads)!;
+		return { .data = blocks, .width = img.width, .height = img.height };
+	}
+
+	Allocator target = tf_format == TF_RGBA32 ? allocator : tmem;
+	usz size = (usz)img.width * img.height * 4;
+	char* buf = alloc::malloc(target, (sz)size);
+	char[] rgba = buf[:size];
+	if (catch err = uastc::decode_image(img.blocks, rgba, img.width, img.height))
+	{
+		alloc::free(target, buf);
 		return err~;
 	}
-	return { .data = rgba, .width = w, .height = h };
+	if (tf_format == TF_RGBA32) return { .data = rgba, .width = img.width, .height = img.height };
+	return bcn_from_rgba(allocator, rgba, img.width, img.height, tf_format);
 }
 
-<*
- Transcode one image (level/layer/face) of an ETC1S/UASTC KTX2 blob to the
- given TF_* target. `unit_bytes` is the target's bytes-per-block (16 for
- BC7/BC3, 8 for BC1/BC4) or bytes-per-pixel (4 for TF_RGBA32). The returned
- slice is allocated from `allocator`.
-
- Supported targets: TF_RGBA32, TF_BC1_RGB, TF_BC3_RGBA, TF_BC7_RGBA
- (`unit_bytes` is kept for API stability; it is no longer consulted).
-*>
-fn Transcoded? transcode(Allocator allocator, char[] ktx2, uint level, uint layer, uint face, uint tf_format, uint unit_bytes)
+struct Etc1sFile @local
 {
-	uint model = dfd_model(ktx2);
-	if (model != dfd::MODEL_UASTC && model != dfd::MODEL_ETC1S) return OPEN_FAILED~;
-	switch (tf_format)
-	{
-		case TF_RGBA32:
-			return model == dfd::MODEL_UASTC
-				? transcode_uastc_rgba32(allocator, ktx2, level, layer, face)
-				: transcode_etc1s_rgba32(allocator, ktx2, level, layer, face);
-		case TF_BC1_RGB:
-		case TF_BC3_RGBA:
-		case TF_BC7_RGBA:
-			return transcode_bcn(allocator, ktx2, level, layer, face, tf_format, model);
-		default:
-			return UNSUPPORTED_TARGET~;
-	}
+	etc1s::Codebook cb;   // shared by every image in the file
+	char[] ktx2;
+	char[] sgd;
+	uint width;
+	uint height;
+	uint layers;
+	uint faces;
+	uint level_count;
 }
 
-<*
- BC1/BC3/BC7 targets without basisu (docs/basis-rewrite.md phase 3): pure-C3
- RGBA decode, then the library's own BCn encoders. Correct output rather than
- basisu's specialized block-level transcode — quality tracked by
- test/transcode_bcn_test.c3.
-*>
-fn Transcoded? transcode_bcn(Allocator allocator, char[] ktx2, uint level, uint layer, uint face, uint tf_format, uint model) @local => @pool()
+struct Etc1sImage @local
 {
-	Transcoded src = model == dfd::MODEL_UASTC
-		? transcode_uastc_rgba32(tmem, ktx2, level, layer, face)!
-		: transcode_etc1s_rgba32(tmem, ktx2, level, layer, face)!;
-
-	char[] blocks;
-	switch (tf_format)
-	{
-		case TF_BC1_RGB:  blocks = bcn::encode(allocator, bcn::BcnFormat.BC1, src.data, src.width, src.height)!;
-		case TF_BC3_RGBA: blocks = bcn::encode(allocator, bcn::BcnFormat.BC3, src.data, src.width, src.height)!;
-		default:          blocks = bc7::encode(allocator, src.data, src.width, src.height)!;
-	}
-	return { .data = blocks, .width = src.width, .height = src.height };
+	etc1s::Codebook* cb;
+	char[] rgb;
+	char[] alpha;   // empty when the file carries no alpha slices
+	uint width;
+	uint height;
 }
 
 <*
- Pure-C3 RGBA32 transcode of one image of an ETC1S/BasisLZ KTX2 blob
- (docs/basis-rewrite.md phase 2). The BasisLZ level payloads are not
- Zstd-compressed (the slices themselves are the compression), so this parses
- the level index and supercompressionGlobalData directly instead of going
- through container::read.
+ An ETC1S/BasisLZ KTX2 blob's shared parts: the endpoint and selector
+ codebooks and the Huffman models every slice in the file is coded against,
+ plus what is needed to find any image's slices.
+
+ The BasisLZ level payloads are not Zstd-compressed (the slices themselves are
+ the compression), so this parses the level index and
+ supercompressionGlobalData directly instead of going through
+ container::read.
 *>
-fn Transcoded? transcode_etc1s_rgba32(Allocator allocator, char[] ktx2, uint level, uint layer, uint face) @local => @pool()
+fn Etc1sFile? etc1s_file(Allocator allocator, char[] ktx2) @local
 {
 	if (ktx2.len < container::HEADER_SIZE) return OPEN_FAILED~;
-	uint width = util::rd32(ktx2, 20);
-	uint height = util::rd32(ktx2, 24);
 	uint layers = max(util::rd32(ktx2, 32), 1u);
 	uint face_count = max(util::rd32(ktx2, 36), 1u);
 	uint level_count = max(util::rd32(ktx2, 40), 1u);
 	ulong sgd_off = util::rd64(ktx2, 64);
 	ulong sgd_len = util::rd64(ktx2, 72);
-	if (level >= level_count || layer >= layers || face >= face_count) return TRANSCODE_FAILED~;
 	if (!sgd_len || sgd_off + sgd_len > ktx2.len) return OPEN_FAILED~;
 
 	// supercompressionGlobalData: counts/lengths header, per-image slice
@@ -477,44 +470,192 @@ fn Transcoded? transcode_etc1s_rgba32(Allocator allocator, char[] ktx2, uint lev
 	uint num_images = level_count * layers * face_count;
 	usz descs_end = 20 + (usz)num_images * 20;
 	if (descs_end + endpoints_len + selectors_len + tables_len > sgd.len) return OPEN_FAILED~;
-	char[] endpoints_data = sgd[descs_end : (sz)endpoints_len];
-	char[] selectors_data = sgd[descs_end + (sz)endpoints_len : (sz)selectors_len];
-	char[] tables_data = sgd[descs_end + (sz)endpoints_len + (sz)selectors_len : (sz)tables_len];
 
-	usz desc = 20 + ((usz)level * layers * face_count + (usz)layer * face_count + face) * 20;
-	uint rgb_off = util::rd32(sgd, (sz)desc + 4);
-	uint rgb_len = util::rd32(sgd, (sz)desc + 8);
-	uint alpha_off = util::rd32(sgd, (sz)desc + 12);
-	uint alpha_len = util::rd32(sgd, (sz)desc + 16);
+	etc1s::Codebook cb = etc1s::decode_codebook(allocator, num_endpoints,
+		sgd[descs_end : (sz)endpoints_len],
+		num_selectors, sgd[descs_end + (sz)endpoints_len : (sz)selectors_len],
+		sgd[descs_end + (sz)endpoints_len + (sz)selectors_len : (sz)tables_len])!;
 
-	ulong level_off = util::rd64(ktx2, container::HEADER_SIZE + (sz)level * container::LEVEL_ENTRY_SIZE);
-	ulong level_len = util::rd64(ktx2, container::HEADER_SIZE + (sz)level * container::LEVEL_ENTRY_SIZE + 8);
-	if (level_off + level_len > ktx2.len) return OPEN_FAILED~;
-	char[] level_data = ktx2[(sz)level_off:(sz)level_len];
+	return {
+		.cb = cb,
+		.ktx2 = ktx2,
+		.sgd = sgd,
+		.width = util::rd32(ktx2, 20),
+		.height = util::rd32(ktx2, 24),
+		.layers = layers,
+		.faces = face_count,
+		.level_count = level_count,
+	};
+}
+
+<* One image's colour and alpha slice payloads out of an opened ETC1S file. *>
+fn Etc1sImage? etc1s_slice(Etc1sFile* f, uint level, uint layer, uint face) @local
+{
+	if (level >= f.level_count || layer >= f.layers || face >= f.faces) return TRANSCODE_FAILED~;
+
+	usz desc = 20 + ((usz)level * f.layers * f.faces + (usz)layer * f.faces + face) * 20;
+	uint rgb_off = util::rd32(f.sgd, (sz)desc + 4);
+	uint rgb_len = util::rd32(f.sgd, (sz)desc + 8);
+	uint alpha_off = util::rd32(f.sgd, (sz)desc + 12);
+	uint alpha_len = util::rd32(f.sgd, (sz)desc + 16);
+
+	ulong level_off = util::rd64(f.ktx2, container::HEADER_SIZE + (sz)level * container::LEVEL_ENTRY_SIZE);
+	ulong level_len = util::rd64(f.ktx2, container::HEADER_SIZE + (sz)level * container::LEVEL_ENTRY_SIZE + 8);
+	if (level_off + level_len > f.ktx2.len) return OPEN_FAILED~;
+	char[] level_data = f.ktx2[(sz)level_off:(sz)level_len];
 	if ((ulong)rgb_off + rgb_len > level_data.len) return OPEN_FAILED~;
 	if (alpha_len && (ulong)alpha_off + alpha_len > level_data.len) return OPEN_FAILED~;
 
-	etc1s::Codebook cb = etc1s::decode_codebook(tmem, num_endpoints, endpoints_data,
-		num_selectors, selectors_data, tables_data)!;
+	char[] alpha;
+	if (alpha_len) alpha = level_data[alpha_off:alpha_len];
+	return {
+		.cb = &f.cb,
+		.rgb = level_data[rgb_off:rgb_len],
+		.alpha = alpha,
+		.width = max(f.width >> level, 1u),
+		.height = max(f.height >> level, 1u),
+	};
+}
 
-	uint w = max(width >> level, 1u);
-	uint h = max(height >> level, 1u);
-	char* buf = alloc::malloc(allocator, (sz)((usz)w * h * 4));
-	char[] rgba = buf[:(usz)w * h * 4];
-	bool ok;
-	defer if (!ok) alloc::free(allocator, buf);
-
-	if (alpha_len)
+<*
+ One ETC1S image at the given target. RGBA32 is the phase-2 slice decode,
+ colour and alpha in the two passes the format keeps them in; BC7 is the block
+ mapper; BC1/BC3 decode and re-encode.
+*>
+fn Transcoded? etc1s_to(Allocator allocator, Etc1sImage* img, uint tf_format, uint threads = 0) @local => @pool()
+{
+	if (tf_format == TF_BC7_RGBA)
 	{
-		cb.decode_slice(level_data[alpha_off:alpha_len], w, h, rgba, etc1s::Pass.ALPHA, tmem)!;
-		cb.decode_slice(level_data[rgb_off:rgb_len], w, h, rgba, etc1s::Pass.RGB, tmem)!;
+		char[] blocks = etc1s_bc7::map_image(allocator, img.cb, img.rgb, img.alpha,
+			img.width, img.height, tmem, threads)!;
+		return { .data = blocks, .width = img.width, .height = img.height };
+	}
+
+	Allocator target = tf_format == TF_RGBA32 ? allocator : tmem;
+	usz size = (usz)img.width * img.height * 4;
+	char* buf = alloc::malloc(target, (sz)size);
+	char[] rgba = buf[:size];
+	bool ok;
+	defer if (!ok) alloc::free(target, buf);
+
+	if (img.alpha.len)
+	{
+		img.cb.decode_slice(img.alpha, img.width, img.height, rgba, etc1s::Pass.ALPHA, tmem)!;
+		img.cb.decode_slice(img.rgb, img.width, img.height, rgba, etc1s::Pass.RGB, tmem)!;
 	}
 	else
 	{
-		cb.decode_slice(level_data[rgb_off:rgb_len], w, h, rgba, etc1s::Pass.RGB_OPAQUE, tmem)!;
+		img.cb.decode_slice(img.rgb, img.width, img.height, rgba, etc1s::Pass.RGB_OPAQUE, tmem)!;
 	}
 	ok = true;
-	return { .data = rgba, .width = w, .height = h };
+	if (tf_format == TF_RGBA32) return { .data = rgba, .width = img.width, .height = img.height };
+	return bcn_from_rgba(allocator, rgba, img.width, img.height, tf_format);
+}
+
+<*
+ The BC1/BC3 targets, which have no block mapper: decoded pixels through the
+ library's own BCn encoders. Quality is tracked by test/transcode_bcn_test.c3.
+*>
+fn Transcoded? bcn_from_rgba(Allocator allocator, char[] rgba, uint width, uint height, uint tf_format) @local
+{
+	bcn::BcnFormat fmt = tf_format == TF_BC1_RGB ? bcn::BcnFormat.BC1 : bcn::BcnFormat.BC3;
+	char[] blocks = bcn::encode(allocator, fmt, rgba, width, height)!;
+	return { .data = blocks, .width = width, .height = height };
+}
+
+<*
+ Transcode one image (level/layer/face) of an ETC1S/UASTC KTX2 blob to the
+ given TF_* target. `unit_bytes` is the target's bytes-per-block (16 for
+ BC7/BC3, 8 for BC1/BC4) or bytes-per-pixel (4 for TF_RGBA32). The returned
+ slice is allocated from `allocator`.
+
+ Supported targets: TF_RGBA32, TF_BC1_RGB, TF_BC3_RGBA, TF_BC7_RGBA
+ (`unit_bytes` is kept for API stability; it is no longer consulted).
+
+ **BC7 is a block mapper** (docs/basis-rewrite.md phase 3): both source
+ formats are BC7's own shape — endpoints, a weight grid, an index per texel —
+ so ktx::uastc_bc7 and ktx::etc1s_bc7 rewrite each block as a BC7 block and
+ never build a pixel. Everything else decodes first.
+
+ A caller wanting a whole mip chain should ask `transcode_levels` for it: this
+ reads the file's shared parts — the container index, and for ETC1S the
+ codebooks — on every call.
+*>
+fn Transcoded? transcode(Allocator allocator, char[] ktx2, uint level, uint layer, uint face, uint tf_format, uint unit_bytes) => @pool()
+{
+	uint model = dfd_model(ktx2);
+	if (model != dfd::MODEL_UASTC && model != dfd::MODEL_ETC1S) return OPEN_FAILED~;
+	switch (tf_format)
+	{
+		case TF_RGBA32:
+		case TF_BC1_RGB:
+		case TF_BC3_RGBA:
+		case TF_BC7_RGBA:
+			break;
+		default:
+			return UNSUPPORTED_TARGET~;
+	}
+
+	if (model == dfd::MODEL_UASTC)
+	{
+		container::Texture tex = container::read(tmem, ktx2)!;
+		UastcImage img = uastc_slice(&tex, level, layer, face)!;
+		return uastc_to(allocator, img, tf_format);
+	}
+	Etc1sFile file = etc1s_file(tmem, ktx2)!;
+	Etc1sImage img = etc1s_slice(&file, level, layer, face)!;
+	return etc1s_to(allocator, &img, tf_format);
+}
+
+<*
+ Every level of one image, transcoded in one pass — level 0 first, one entry
+ per level the file carries.
+
+ The same targets `transcode` takes, and the same answers, for a caller that
+ wants the whole chain. What it saves is the reading: a UASTC file's levels
+ are Zstd-supercompressed as one container, and an ETC1S file's slices are all
+ coded against one pair of codebooks, so asking `transcode` level by level
+ inflates or Huffman-decodes the shared part again every time — on a 1024x1024
+ image with eleven levels, about as much work as the transcode itself.
+
+ The array and every `data` in it are allocated from `allocator`; the caller
+ frees each `data` and then the array.
+
+ @param threads : `The block mapper's thread count. 0 decides from the core count; 1 pins it to the calling thread, which is what a caller transcoding several images at once wants.`
+*>
+fn Transcoded[]? transcode_levels(Allocator allocator, char[] ktx2, uint layer, uint face, uint tf_format, uint threads = 0) => @pool()
+{
+	uint model = dfd_model(ktx2);
+	if (model != dfd::MODEL_UASTC && model != dfd::MODEL_ETC1S) return OPEN_FAILED~;
+	Info nfo = info(ktx2)!;
+	Transcoded[] out = alloc::new_array(allocator, Transcoded, (sz)nfo.levels);
+	uint done;
+	defer if (done != nfo.levels)
+	{
+		for (uint l = 0; l < done; l++) alloc::free(allocator, out[l].data.ptr);
+		alloc::free(allocator, out.ptr);
+	}
+
+	if (model == dfd::MODEL_UASTC)
+	{
+		container::Texture tex = container::read(tmem, ktx2)!;
+		for (uint l = 0; l < nfo.levels; l++)
+		{
+			UastcImage img = uastc_slice(&tex, l, layer, face)!;
+			out[l] = uastc_to(allocator, img, tf_format, threads)!;
+			done++;
+		}
+		return out;
+	}
+
+	Etc1sFile file = etc1s_file(tmem, ktx2)!;
+	for (uint l = 0; l < nfo.levels; l++)
+	{
+		Etc1sImage img = etc1s_slice(&file, l, layer, face)!;
+		out[l] = etc1s_to(allocator, &img, tf_format, threads)!;
+		done++;
+	}
+	return out;
 }
 
 struct Info

@@ -123,17 +123,7 @@ basis_universal's unpackers.
 
 ## ETC1S / UASTC + BasisLZ
 
-> The pure-C3 rewrite of basis_universal is complete (`docs/basis-rewrite.md`,
-> phases 0–6): codecs, container assembly and Zstd linkage no longer involve
-> basisu at all. How it was proven, while basisu was still linked: decoding is
-> bit-exact against the basisu transcoder on a recorded golden corpus (all 19
-> UASTC modes, BasisLZ codebooks/slices incl. alpha), and basisu's transcoder
-> decoded C3-encoded files bit-identically to ours across every format, shape
-> and mip level. Quality vs basisu at q90/e2: UASTC beats basisu's PSNR on the
-> whole corpus (no RDO — smooth-content files run larger, ~2x worst case;
-> ETC1/EAC transcode hints are zeroed except solid blocks); ETC1S is within
-> ~0.7 dB (ahead on some images), sizes −4..+10% at q10 and +6..32% at q90
-> (frontend iteration ongoing). Everything passes official `ktx validate`.
+
 
 All ETC1S/UASTC encoding and decoding is pure C3 (`src/ktx/{uastc,etc1s}.c3`,
 assembled into KTX2 by `src/ktx/basis.c3`) — no
@@ -169,12 +159,14 @@ basisu's RDO, which the C3 encoder doesn't do yet). Both default to
 
 Encoding and decoding both use every core by default (`ktx::parallel`, a small
 fork-join helper over `std::thread`): UASTC/BC7/BCn encode *and* decode block
-rows in parallel and the ETC1S k-means/reassignment searches are parallel too.
+rows in parallel, the two Basis-to-BC7 block mappers map block rows in parallel,
+and the ETC1S k-means/reassignment searches are parallel too.
 Only the searches run concurrently — order-sensitive accumulation stays serial —
 so **output is byte-identical for any thread count**. Library callers can pass
 `threads: 1` (any of `uastc::encode_image`, `etc1s::encode`, `bc7::encode`,
-`bcn::encode`, `uastc::decode_image`, `bc7::decode`, `bcn::decode`) to force
-single-threaded operation.
+`bcn::encode`, `uastc::decode_image`, `bc7::decode`, `bcn::decode`,
+`uastc_bc7::map_image`, `etc1s_bc7::map_image`) to force single-threaded
+operation.
 
 The decoders are cheap enough per block that spawning a thread can cost more
 than the work, so their automatic thread count is capped by the size of the job
@@ -183,8 +175,7 @@ slower by the split. An explicit `threads` is always obeyed. ETC1S is the one
 payload that stays serial on the way in — its slices are a single Huffman
 bitstream with cross-block endpoint prediction, so there is nothing to split.
 
-Transcode targets are RGBA32, BC1, BC3 and BC7 (BCn via the library's own
-encoders). The only native dependency is zstd — prebuilt per platform as
+ The only native dependency is zstd — prebuilt per platform as
 `lib/<target>/libzstd.a`, so this works out of the box with **no system libzstd
 and no C++ runtime**. zstd is *not* vendored; to rebuild the lib (only needed
 to bump zstd or add a platform), run the build script — it fetches the pinned

@@ -378,7 +378,7 @@ fn void BitWriter.put(&self, uint v, uint nbits)
 // ---------------------------------------------------------------------------
 
 // Dequantize an endpoint value with a p-bit appended.
-fn uint dequant_p(uint val, uint pbit, uint bits) @private
+fn uint dequant_p(uint val, uint pbit, uint bits)
 {
 	uint total = bits + 1;
 	uint v = (val << 1) | pbit;
@@ -388,7 +388,7 @@ fn uint dequant_p(uint val, uint pbit, uint bits) @private
 }
 
 // Dequantize an endpoint value without a p-bit.
-fn uint dequant(uint val, uint bits) @private
+fn uint dequant(uint val, uint bits)
 {
 	uint v = val << (8 - bits);
 	v |= v >> bits;
@@ -396,12 +396,12 @@ fn uint dequant(uint val, uint bits) @private
 }
 
 // BC7 interpolation; w is a weight value from one of the WEIGHTS tables.
-fn uint interp(uint a, uint b, uint w) @private
+fn uint interp(uint a, uint b, uint w)
 {
 	return (a * (64 - w) + b * w + 32) >> 6;
 }
 
-fn uint weight_val(uint nbits, uint i) @private
+fn uint weight_val(uint nbits, uint i)
 {
 	switch (nbits)
 	{
@@ -648,6 +648,116 @@ fn void decode_mode6(char* blk, char* px) @private
 	for (uint i = 0; i < 16; i++)
 	{
 		for (uint c = 0; c < 4; c++) px[i * 4 + c] = (char)pal[widx[i] * 4 + c];
+	}
+}
+
+
+// ---------------------------------------------------------------------------
+// Block assembly (used by the Basis block transcoders in ktx::uastc_bc7 /
+// ktx::etc1s_bc7, which build BC7 blocks field by field instead of encoding)
+// ---------------------------------------------------------------------------
+
+<*
+ A BC7 block as its fields — exactly what `decode_block` reads back out.
+ `ep` holds endpoints already in the mode's own quantization, indexed
+ `[subset * 2 + low/high][channel]`; `idx` is the primary index plane and
+ `idx2` the second one modes 4 and 5 carry. On mode 4 the *first* written
+ plane is the 2-bit one whatever `index_selector` points it at, so a caller
+ fills `idx`/`idx2` by plane width, not by meaning.
+
+ Anchor indices must already have their high bit clear: the packer drops that
+ bit rather than checking it. Swapping a subset's two endpoints and
+ complementing its indices is what makes that always arrangeable, and it is
+ lossless because every BC7 weight table is symmetric.
+*>
+struct BlockFields
+{
+	char mode;
+	char partition;
+	char rotation;
+	char index_selector;
+	char[4][6] ep;
+	char[6] pbits;
+	char[16] idx;
+	char[16] idx2;
+}
+
+fn void put_bits(ulong[2]* acc, uint* pos, uint v, uint n) @private
+{
+	if (!n) return;
+	ulong val = (ulong)v & ((1UL << n) - 1);
+	uint p = *pos;
+	if (p < 64)
+	{
+		(*acc)[0] |= val << p;
+		if (p + n > 64) (*acc)[1] |= val >> (64 - p);
+	}
+	else
+	{
+		(*acc)[1] |= val << (p - 64);
+	}
+	*pos = p + n;
+}
+
+<* Pack one BlockFields into 16 bytes, LSB-first, per the BC7 bit layout. *>
+fn void pack_fields(char* out, BlockFields* f)
+{
+	ulong[2] acc;
+	uint pos;
+	uint mode = f.mode;
+	put_bits(&acc, &pos, 1u << mode, mode + 1);
+	if (MODE_ROTATION_BITS[mode] != 0) put_bits(&acc, &pos, (uint)f.rotation, 2);
+	if (MODE_INDEX_SEL_BITS[mode] != 0) put_bits(&acc, &pos, (uint)f.index_selector, 1);
+	if (MODE_PARTITION_BITS[mode] != 0) put_bits(&acc, &pos, (uint)f.partition, (uint)MODE_PARTITION_BITS[mode]);
+
+	uint subsets = MODE_SUBSETS[mode];
+	uint ne = subsets * 2;
+	uint cbits = MODE_COLOR_BITS[mode];
+	uint abits = MODE_ALPHA_BITS[mode];
+	uint comps = abits != 0 ? 4 : 3;
+	for (uint c = 0; c < comps; c++)
+	{
+		uint bits = c == 3 ? abits : cbits;
+		for (uint e = 0; e < ne; e++) put_bits(&acc, &pos, (uint)f.ep[e][c], bits);
+	}
+	switch (MODE_PBIT_TYPE[mode])
+	{
+		case PBIT_PER_ENDPOINT:
+			for (uint e = 0; e < ne; e++) put_bits(&acc, &pos, (uint)f.pbits[e], 1);
+		case PBIT_SHARED:
+			for (uint s = 0; s < subsets; s++) put_bits(&acc, &pos, (uint)f.pbits[s], 1);
+		default:
+			break;
+	}
+
+	uint ibits = MODE_INDEX_BITS[mode];
+	uint i2bits = MODE_INDEX2_BITS[mode];
+	if (i2bits != 0)
+	{
+		for (uint i = 0; i < 16; i++) put_bits(&acc, &pos, (uint)f.idx[i], i == 0 ? ibits - 1 : ibits);
+		for (uint i = 0; i < 16; i++) put_bits(&acc, &pos, (uint)f.idx2[i], i == 0 ? i2bits - 1 : i2bits);
+	}
+	else
+	{
+		uint a1 = 16;
+		uint a2 = 16;
+		if (subsets == 2) a1 = ANCHOR_2ND_SUBSET[f.partition];
+		if (subsets == 3)
+		{
+			a1 = ANCHOR_3RD_SUBSET_1[f.partition];
+			a2 = ANCHOR_3RD_SUBSET_2[f.partition];
+		}
+		for (uint i = 0; i < 16; i++)
+		{
+			bool anchor = i == 0 || i == a1 || i == a2;
+			put_bits(&acc, &pos, (uint)f.idx[i], anchor ? ibits - 1 : ibits);
+		}
+	}
+
+	for (uint i = 0; i < 8; i++)
+	{
+		out[i] = (char)(acc[0] >> (i * 8));
+		out[8 + i] = (char)(acc[1] >> (i * 8));
 	}
 }
 
