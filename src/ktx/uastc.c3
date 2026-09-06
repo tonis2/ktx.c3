@@ -206,18 +206,40 @@ fn char weight_scale(uint index, uint weight_bits) @local
 }
 
 <*
- Decode one 16-byte UASTC block into 16 RGBA8 pixels (row-major 4x4, 64
- bytes). `srgb` selects the interpolation rounding basisu uses for sRGB
- targets; RGBA32 transcodes use false.
+ One UASTC block's fields, parsed but not yet interpolated: the mode's shape,
+ its per-subset 8-bit endpoint pairs and its weight indices. It sits between
+ the bitstream and the pixels so a transcoder can rewrite a block into another
+ block format without ever building the pixels (see ktx::uastc_bc7).
 *>
-fn void? decode_block(char[] block, char[] out, bool srgb = false)
+struct Unpacked
 {
-	assert(block.len == 16 && out.len == 64);
+	uint mode;
+	uint subsets;         // 1..3
+	uint planes;          // 2 on the dual-plane modes
+	uint weight_bits;
+	uint pattern;         // common-pattern index; 0 on single-subset modes
+	int ccs;              // component the second plane drives, -1 if single-plane
+	uint[3] anchors;      // first texel of each subset (16 = subset unused)
+	char[16] partition;   // subset per texel
+	char[4][2][3] ep;     // [subset][low/high][rgba], unquantized to 0..255
+	char[32] weights;     // [texel * planes + plane]
+}
+
+<*
+ Parse one 16-byte UASTC block into `u`, stopping before interpolation.
+ Mode 8 (solid) comes back as one subset whose two endpoints are both the
+ block's colour, so a caller needs no special case for it.
+*>
+fn void? unpack_block(char[] block, Unpacked* u)
+{
+	assert(block.len == 16);
 	bits::Reader r = bits::reader(block);
 
 	uint mode = HUFF_MODES[block[0] & 127];
 	if (mode >= TOTAL_MODES) return INVALID_BLOCK~;
 	r.skip(MODE_CODE_SIZES[mode]);
+
+	*u = { .mode = mode, .subsets = 1, .planes = 1, .ccs = -1, .anchors = { 0, 16, 16 } };
 
 	if (mode == MODE_SOLID)
 	{
@@ -225,13 +247,8 @@ fn void? decode_block(char[] block, char[] out, bool srgb = false)
 		char cg = (char)r.read(8);
 		char cb = (char)r.read(8);
 		char ca = (char)r.read(8);
-		for (uint i = 0; i < 16; i++)
-		{
-			out[i * 4] = cr;
-			out[i * 4 + 1] = cg;
-			out[i * 4 + 2] = cb;
-			out[i * 4 + 3] = ca;
-		}
+		u.ep[0][0] = { cr, cg, cb, ca };
+		u.ep[0][1] = { cr, cg, cb, ca };
 		return;
 	}
 
@@ -362,57 +379,50 @@ fn void? decode_block(char[] block, char[] out, bool srgb = false)
 	}
 
 	// --- partition pattern + per-subset anchor texels ---
-	char[16] zero_pattern;
-	char[] pattern = zero_pattern[..];
-	uint a0 = 0;
-	uint a1 = 16;   // sentinels that never match a texel index
-	uint a2 = 16;
 	if (subsets == 3)
 	{
-		pattern = PATTERNS3[common_pattern * 16 : 16];
-		a0 = ANCHORS3[common_pattern * 3];
-		a1 = ANCHORS3[common_pattern * 3 + 1];
-		a2 = ANCHORS3[common_pattern * 3 + 2];
+		u.partition[..] = PATTERNS3[common_pattern * 16 : 16];
+		u.anchors[0] = ANCHORS3[common_pattern * 3];
+		u.anchors[1] = ANCHORS3[common_pattern * 3 + 1];
+		u.anchors[2] = ANCHORS3[common_pattern * 3 + 2];
 	}
 	else if (subsets == 2)
 	{
 		if (mode == 7)
 		{
-			pattern = PATTERNS2_3[common_pattern * 16 : 16];
-			a0 = ANCHORS2_3[common_pattern * 2];
-			a1 = ANCHORS2_3[common_pattern * 2 + 1];
+			u.partition[..] = PATTERNS2_3[common_pattern * 16 : 16];
+			u.anchors[0] = ANCHORS2_3[common_pattern * 2];
+			u.anchors[1] = ANCHORS2_3[common_pattern * 2 + 1];
 		}
 		else
 		{
-			pattern = PATTERNS2[common_pattern * 16 : 16];
-			a0 = ANCHORS2[common_pattern * 2];
-			a1 = ANCHORS2[common_pattern * 2 + 1];
+			u.partition[..] = PATTERNS2[common_pattern * 16 : 16];
+			u.anchors[0] = ANCHORS2[common_pattern * 2];
+			u.anchors[1] = ANCHORS2[common_pattern * 2 + 1];
 		}
 	}
 
 	// --- weights: plain bits, anchors store one less bit ---
 	uint weight_bits = MODE_WEIGHT_BITS[mode];
-	char[32] weights;
 	if (planes == 2)
 	{
 		// Single subset; texel 0's two weights are the anchors.
 		for (uint i = 0; i < 32; i++)
 		{
-			weights[i] = (char)r.read(i < 2 ? weight_bits - 1 : weight_bits);
+			u.weights[i] = (char)r.read(i < 2 ? weight_bits - 1 : weight_bits);
 		}
 	}
 	else
 	{
 		for (uint i = 0; i < 16; i++)
 		{
-			bool anchor = i == a0 || i == a1 || i == a2;
-			weights[i] = (char)r.read(anchor ? weight_bits - 1 : weight_bits);
+			bool anchor = i == u.anchors[0] || i == u.anchors[1] || i == u.anchors[2];
+			u.weights[i] = (char)r.read(anchor ? weight_bits - 1 : weight_bits);
 		}
 	}
 	if (!r.ok()) return INVALID_BLOCK~;
 
-	// --- reconstruct: unquantized endpoint pairs -> per-level colors ---
-	char[4][2][3] ep;   // [subset][low/high][rgba]
+	// --- unquantized endpoint pairs ---
 	for (uint s = 0; s < subsets; s++)
 	{
 		if (comps == 2)
@@ -422,44 +432,69 @@ fn void? decode_block(char[] block, char[] out, bool srgb = false)
 			char lh = (char)unquant_endpoint(endpoints[s * 4 + 1], endpoint_range);
 			char al = (char)unquant_endpoint(endpoints[s * 4 + 2], endpoint_range);
 			char ah = (char)unquant_endpoint(endpoints[s * 4 + 3], endpoint_range);
-			ep[s][0] = { ll, ll, ll, al };
-			ep[s][1] = { lh, lh, lh, ah };
+			u.ep[s][0] = { ll, ll, ll, al };
+			u.ep[s][1] = { lh, lh, lh, ah };
 		}
 		else
 		{
 			for (uint c = 0; c < comps; c++)
 			{
-				ep[s][0][c] = (char)unquant_endpoint(endpoints[s * comps * 2 + c * 2 + 0], endpoint_range);
-				ep[s][1][c] = (char)unquant_endpoint(endpoints[s * comps * 2 + c * 2 + 1], endpoint_range);
+				u.ep[s][0][c] = (char)unquant_endpoint(endpoints[s * comps * 2 + c * 2 + 0], endpoint_range);
+				u.ep[s][1][c] = (char)unquant_endpoint(endpoints[s * comps * 2 + c * 2 + 1], endpoint_range);
 			}
 			for (uint c = comps; c < 4; c++)
 			{
-				ep[s][0][c] = 255;
-				ep[s][1][c] = 255;
+				u.ep[s][0][c] = 255;
+				u.ep[s][1][c] = 255;
 			}
 		}
 	}
 
-	uint weight_levels = 1u << weight_bits;
+	u.subsets = subsets;
+	u.planes = planes;
+	u.weight_bits = weight_bits;
+	u.pattern = common_pattern;
+	u.ccs = ccs;
+}
+
+<*
+ Decode one 16-byte UASTC block into 16 RGBA8 pixels (row-major 4x4, 64
+ bytes). `srgb` selects the interpolation rounding basisu uses for sRGB
+ targets; RGBA32 transcodes use false.
+*>
+fn void? decode_block(char[] block, char[] out, bool srgb = false)
+{
+	assert(block.len == 16 && out.len == 64);
+	Unpacked u;
+	unpack_block(block, &u)!;
+
+	if (u.mode == MODE_SOLID)
+	{
+		for (uint i = 0; i < 16; i++) out[i * 4 : 4] = u.ep[0][0][..];
+		return;
+	}
+
+	// --- reconstruct: unquantized endpoint pairs -> per-level colors ---
+	uint weight_levels = 1u << u.weight_bits;
 	char[4][32][3] colors;   // [subset][weight level][rgba]
-	for (uint s = 0; s < subsets; s++)
+	for (uint s = 0; s < u.subsets; s++)
 	{
 		for (uint l = 0; l < weight_levels; l++)
 		{
-			uint w = weight_scale(l, weight_bits);
+			uint w = weight_scale(l, u.weight_bits);
 			for (uint c = 0; c < 4; c++)
 			{
-				colors[s][l][c] = interpolate(ep[s][0][c], ep[s][1][c], w, srgb);
+				colors[s][l][c] = interpolate(u.ep[s][0][c], u.ep[s][1][c], w, srgb);
 			}
 		}
 	}
 
 	// --- write pixels ---
-	if (planes == 1)
+	if (u.planes == 1)
 	{
 		for (uint i = 0; i < 16; i++)
 		{
-			char[4] px = colors[pattern[i]][weights[i]];
+			char[4] px = colors[u.partition[i]][u.weights[i]];
 			out[i * 4 : 4] = px[..];
 		}
 	}
@@ -467,11 +502,11 @@ fn void? decode_block(char[] block, char[] out, bool srgb = false)
 	{
 		for (uint i = 0; i < 16; i++)
 		{
-			uint w0 = weights[i * 2];
-			uint w1 = weights[i * 2 + 1];
+			uint w0 = u.weights[i * 2];
+			uint w1 = u.weights[i * 2 + 1];
 			for (uint c = 0; c < 4; c++)
 			{
-				out[i * 4 + c] = colors[0][(int)c == ccs ? w1 : w0][c];
+				out[i * 4 + c] = colors[0][(int)c == u.ccs ? w1 : w0][c];
 			}
 		}
 	}

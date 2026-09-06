@@ -203,6 +203,42 @@ struct BlockPred @local
 	ushort endpoint_index;
 }
 
+<* What one block of a slice resolved to, as `walk_slice` reaches it. *>
+struct BlockRef
+{
+	ushort endpoint;
+	ushort selector;
+}
+
+alias BlockFn = fn void(void* ctx, uint bx, uint by, uint endpoint_index, uint selector_index);
+
+struct WriteCtx @local
+{
+	Codebook* cb;
+	char[] out;
+	uint width;
+	uint height;
+	Pass pass;
+}
+
+fn void write_cb(void* ctx, uint bx, uint by, uint endpoint_index, uint selector_index) @local
+{
+	WriteCtx* w = (WriteCtx*)ctx;
+	w.cb.write_block(w.out, w.width, w.height, bx, by, endpoint_index, selector_index, w.pass);
+}
+
+struct RefCtx @local
+{
+	BlockRef[] refs;
+	uint nbx;
+}
+
+fn void ref_cb(void* ctx, uint bx, uint by, uint endpoint_index, uint selector_index) @local
+{
+	RefCtx* r = (RefCtx*)ctx;
+	r.refs[(usz)by * r.nbx + bx] = { (ushort)endpoint_index, (ushort)selector_index };
+}
+
 <*
  Decode one ETC1S slice into `out` (width*height RGBA8, raster order),
  writing the channels `pass` selects (basisu transcode_slice, cRGBA32 /
@@ -214,7 +250,30 @@ fn void? Codebook.decode_slice(&self, char[] slice_data, uint width, uint height
 	uint nby = (height + 3) / 4;
 	if (!nbx || !nby) return INVALID_DIMENSIONS~;
 	if (out.len != (usz)width * height * 4) return INVALID_DIMENSIONS~;
+	WriteCtx ctx = { .cb = self, .out = out, .width = width, .height = height, .pass = pass };
+	return self.walk_slice(slice_data, nbx, nby, &ctx, &write_cb, allocator);
+}
 
+<*
+ The same walk, stopping at the codebook indices: one BlockRef per block, in
+ raster order. What a block transcoder wants — the endpoint and selector a
+ block resolved to *are* the block, and turning them into pixels only to read
+ them back would be the work worth skipping (ktx::etc1s_bc7).
+*>
+fn void? Codebook.decode_slice_blocks(&self, char[] slice_data, uint nbx, uint nby, BlockRef[] out, Allocator allocator)
+{
+	if (!nbx || !nby || out.len != (usz)nbx * nby) return INVALID_DIMENSIONS~;
+	RefCtx ctx = { .refs = out, .nbx = nbx };
+	return self.walk_slice(slice_data, nbx, nby, &ctx, &ref_cb, allocator);
+}
+
+<*
+ Walk one slice's Huffman stream, calling `emit` for every block with the
+ endpoint and selector codebook indices it resolved to. The stream is one
+ bitstream with cross-block prediction, so this is serial by construction.
+*>
+fn void? Codebook.walk_slice(&self, char[] slice_data, uint nbx, uint nby, void* ctx, BlockFn emit, Allocator allocator)
+{
 	bits::Reader r = bits::reader(slice_data);
 
 	// Approximate move-to-front history of recent selector indices.
@@ -346,7 +405,7 @@ fn void? Codebook.decode_slice(&self, char[] slice_data, uint width, uint height
 				return INVALID_STREAM~;
 			}
 
-			self.write_block(out, width, height, bx, by, endpoint_index, selector_index, pass);
+			emit(ctx, bx, by, endpoint_index, selector_index);
 		}
 	}
 }

@@ -1,5 +1,6 @@
 // Threading tests: ktx::parallel covers every item exactly once, and the
-// threaded codec paths (uastc/etc1s/bc7/bcn encode, uastc/bc7/bcn decode)
+// threaded codec paths (uastc/etc1s/bc7/bcn encode, uastc/bc7/bcn decode,
+// the uastc/etc1s to BC7 block mappers)
 // produce byte-identical output for any thread count — the searches are
 // parallel but all order-sensitive accumulation stays serial by design.
 module parallel_testutil;
@@ -42,7 +43,8 @@ fn char[] etc1s_bytes(Allocator allocator, char[] rgba, uint w, uint h, uint thr
 }
 
 module parallel_tests @test;
-import ktx::parallel, ktx::uastc, ktx::bc7, ktx::bcn;
+import ktx::parallel, ktx::uastc, ktx::bc7, ktx::bcn, ktx::etc1s;
+import ktx::uastc_bc7, ktx::etc1s_bc7;
 import parallel_testutil, etc1s_enc_testutil;
 
 fn void run_covers_every_item_once()
@@ -115,6 +117,40 @@ fn void bcn_decode_thread_deterministic() => @pool()
 		char[] threaded = bcn::decode(tmem, fmt, blocks, 70, 54, 4)!!;
 		assert(parallel_testutil::same(serial, threaded), "bcn decode differs across thread counts (format %d)", i);
 	}
+}
+
+<*
+ The two Basis-to-BC7 mappers, which split by block row like the codecs do.
+
+ The ETC1S half runs with an alpha slice on purpose: that is the mode-5 path,
+ and it has a parallel pass the opaque one does not — the per-(endpoint,
+ selector mask) prep, which fills a shared table from several threads and would
+ be the place a race showed up.
+*>
+fn void basis_bc7_map_thread_deterministic() => @pool()
+{
+	char[] img = etc1s_enc_testutil::make_image(tmem, 70, 54);
+
+	char[] blocks = uastc::encode_image(tmem, img, 70, 54)!!;
+	char[] uone = uastc_bc7::map_image(tmem, blocks, 70, 54, 1)!!;
+	char[] ufour = uastc_bc7::map_image(tmem, blocks, 70, 54, 4)!!;
+	assert(parallel_testutil::same(uone, ufour), "uastc to bc7 differs across thread counts");
+
+	etc1s::EncSlice[2] slices;
+	slices[0] = { .rgba = img, .width = 70, .height = 54, .alpha = false };
+	slices[1] = { .rgba = img, .width = 70, .height = 54, .alpha = true };
+	etc1s::Encoded enc = etc1s::encode(tmem, slices[..], 90)!!;
+	etc1s::Codebook cb = etc1s::decode_codebook(tmem, enc.num_endpoints, enc.endpoints_data,
+		enc.num_selectors, enc.selectors_data, enc.tables_data)!!;
+
+	char[] eone = etc1s_bc7::map_image(tmem, &cb, enc.slices[0], enc.slices[1], 70, 54, tmem, 1)!!;
+	char[] efour = etc1s_bc7::map_image(tmem, &cb, enc.slices[0], enc.slices[1], 70, 54, tmem, 4)!!;
+	assert(parallel_testutil::same(eone, efour), "etc1s to bc7 differs across thread counts");
+
+	char[] opaque_one = etc1s_bc7::map_image(tmem, &cb, enc.slices[0], {}, 70, 54, tmem, 1)!!;
+	char[] opaque_four = etc1s_bc7::map_image(tmem, &cb, enc.slices[0], {}, 70, 54, tmem, 4)!!;
+	assert(parallel_testutil::same(opaque_one, opaque_four),
+		"etc1s to bc7 (opaque) differs across thread counts");
 }
 
 <*
