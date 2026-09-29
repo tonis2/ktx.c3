@@ -229,8 +229,8 @@ fn void dfd_bytes_canonical()
 
 fn void reads_reference_file()
 {
-	// Minimal hand-made KTX2 shipped with image.c3l (4x4 R8, no DFD).
-	container::Texture tex = container::read_file(mem, "lib/image.c3l/test/test_gray.ktx2")!!;
+	// Minimal hand-made KTX2 (4x4 R8, no DFD), from image.c3l before its KTX code moved here.
+	container::Texture tex = container::read_file(mem, "test/images/test_gray.ktx2")!!;
 	defer tex.free();
 	assert(tex.vk_format == vk::R8_UNORM);
 	assert(tex.width == 4 && tex.height == 4);

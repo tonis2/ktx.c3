@@ -33,6 +33,8 @@ Vulkan-based engines and asset pipelines.
 ```sh
 c3c build                                 # links bundled libzstd.a (no system libzstd needed)
                                           # getopt.c3l + image.c3l are zipped in lib/
+                                          # Linux builds build/ktx-linux; on macOS use
+                                          # `c3c build ktx`, which builds build/ktx
 
 # color texture: BC7 + full mip chain + Zstd (default) supercompression
 build/ktx create --format bc7-srgb --mipmap -o albedo.ktx2 albedo.png
@@ -101,6 +103,7 @@ links it — the only native code in the library.
 
 ```sh
 c3c test                 # unit tests: round-trips, KATs, alignment, DFD bytes
+                         # (on macOS: c3c test ktx)
 sh test/cross-validate.sh   # optional: validates output with the official ktx tool
 sh test/gen-golden.sh       # regenerate the basis decode oracles in test/golden/
 ```

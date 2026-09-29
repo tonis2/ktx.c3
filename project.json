@@ -16,36 +16,39 @@
   // The only native dependency: zstd (bound in src/ktx/zstd.c3), a prebuilt
   // static lib per platform under lib/<arch>/libzstd.a (native/build-zstd.sh).
   // The ETC1S/UASTC codec is pure C3 (src/ktx/{uastc,etc1s,basis}.c3).
-  // linked-libraries is per-target (not global): target lists are additive in
-  // c3c, and the windows CLI must NOT get "-l zstd" — lld-link never sees the
-  // search paths, so CI passes the zstd.lib path explicitly via -z instead.
-  // The new macOS linker (ld-prime) hard-errors on foreign files found in
-  // search paths (linux-x64/libbasisu.a, the linux libc++.so shim) instead of
-  // skipping them, so each platform gets its own target with only its own
-  // lib directory. `c3c build` builds the default (macOS) target; on linux use
-  // `c3c build ktx-linux`.
-  "linker-search-paths": [ "lib/macos-aarch64" ],
+  // The top level is what plain `c3c build`/`c3c test` link with: zstd from
+  // the linux dirs. Every other platform target *overrides* both lists rather
+  // than adding to them (target lists are additive in c3c), because:
+  // - the new macOS linker (ld-prime) hard-errors on foreign files found in
+  //   search paths instead of skipping them, so a mac target must see only its
+  //   own lib directory. On macOS build and test through it: `c3c build ktx`,
+  //   `c3c test ktx`;
+  // - the windows CLI must NOT get "-l zstd": lld-link never sees the search
+  //   paths, so CI passes the zstd.lib path explicitly via -z instead.
+  "linked-libraries": [ "zstd" ],
+  "linker-search-paths": [ "lib/linux-x64", "lib/linux-aarch64" ],
   "targets": {
+    // First, so it is what plain `c3c build` and `c3c test` use.
+    "ktx-linux": {
+      "type": "executable"
+    },
+    // The macOS (arm64) CLI, as built by CI.
     "ktx": {
       // Executable or library.
       "type": "executable",
-      "linked-libraries": [ "zstd" ]
-    },
-    "ktx-linux": {
-      "type": "executable",
-      "linked-libraries": [ "zstd" ],
-      "linker-search-paths": [ "lib/linux-x64", "lib/linux-aarch64" ]
+      "linker-search-paths-override": [ "lib/macos-aarch64" ]
     },
     // CI cross-build of the x86_64 mac CLI from the arm64 runner
     // (c3c build ktx-macos-x64 --target macos-x64).
     "ktx-macos-x64": {
       "type": "executable",
-      "linked-libraries": [ "zstd" ],
-      "linker-search-paths": [ "lib/macos-x64" ]
+      "linker-search-paths-override": [ "lib/macos-x64" ]
     },
-    // No linked-libraries here: CI links zstd.lib via -z (see build-native.yml).
+    // No zstd here: CI links zstd.lib via -z (see build-native.yml).
     "ktx-windows": {
-      "type": "executable"
+      "type": "executable",
+      "linked-libraries-override": [],
+      "linker-search-paths-override": []
     }
   },
   // Global settings.
