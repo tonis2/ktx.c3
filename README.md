@@ -31,8 +31,8 @@ Vulkan-based engines and asset pipelines.
 ## CLI
 
 ```sh
-git submodule update --init --recursive   # fetch getopt.c3l + image.c3l
 c3c build                                 # links bundled libzstd.a (no system libzstd needed)
+                                          # getopt.c3l + image.c3l are zipped in lib/
 
 # color texture: BC7 + full mip chain + Zstd (default) supercompression
 build/ktx create --format bc7-srgb --mipmap -o albedo.ktx2 albedo.png

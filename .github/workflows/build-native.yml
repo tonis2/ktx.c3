@@ -42,8 +42,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive            # getopt.c3l + image.c3l for the CLI build
       - name: Install c3c
         run: |
           curl -fsSL -o /tmp/c3c-dist "https://github.com/c3lang/c3c/releases/download/${C3C_RELEASE}/${{ matrix.c3c }}"
@@ -84,8 +82,6 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - name: Install c3c
         run: |
           curl -fsSL -o /tmp/c3-macos.zip "https://github.com/c3lang/c3c/releases/download/${C3C_RELEASE}/c3-macos.zip"
@@ -112,8 +108,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - name: Install c3c
         shell: bash
         run: |
