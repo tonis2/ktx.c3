@@ -5,7 +5,7 @@
 // without a work queue or any synchronization beyond spawn/join.
 module ktx::parallel;
 import std::thread;
-import std::thread::cpu;
+import std::os; // num_cpu: std::thread::cpu answers 1 on Android
 
 alias ItemFn = fn void(void* ctx, usz item);
 
@@ -49,13 +49,13 @@ fn int shard_main(void* arg) @local
 fn uint shares(usz count, usz min_per_thread, uint threads = 0)
 {
 	if (threads != 0) return threads;
-	// Decided before `native_cpu` is asked, and that order is the point: the query
+	// Decided before `num_cpu` is asked, and that order is the point: the query
 	// costs microseconds here, which is most of what decoding a 32x32 texture
 	// costs in the first place. The small case must not pay to be told how many
 	// cores it is not going to use.
 	usz worth = min_per_thread ? count / min_per_thread : count;
 	if (worth < 2) return 1;
-	int n = cpu::native_cpu();
+	int n = os::num_cpu();
 	uint cores = n < 1 ? 1 : (uint)n;
 	return (usz)cores > worth ? (uint)worth : cores;
 }
@@ -71,7 +71,7 @@ fn void run(usz count, void* ctx, ItemFn func, uint threads = 0)
 {
 	if (threads == 0)
 	{
-		int n = cpu::native_cpu();
+		int n = os::num_cpu();
 		threads = n < 1 ? 1 : (uint)n;
 	}
 	if (threads > MAX_THREADS) threads = MAX_THREADS;

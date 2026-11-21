@@ -17,6 +17,9 @@
   // lib/<target>/ instead of the default <target>/ at the library root.
   "linklib-dir": "lib",
   "targets": {
+    "android-aarch64": {
+      "linked-libraries": [ "zstd" ]
+    },
     "macos-aarch64": {
       "linked-libraries": [ "zstd" ]
     },

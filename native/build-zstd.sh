@@ -17,6 +17,10 @@
 #   target-triple defaults to the host (macos-aarch64 / macos-x64 /
 #   linux-x64 / linux-aarch64 / windows-x64). windows-x64 needs MSVC (cl/lib)
 #   on PATH and is normally built on a Windows runner.
+#   android-aarch64 cross-compiles with the NDK, e.g.
+#     T=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+#     CC=$T/aarch64-linux-android32-clang AR=$T/llvm-ar RANLIB=$T/llvm-ranlib \
+#       native/build-zstd.sh android-aarch64
 set -euo pipefail
 
 ZSTD_VERSION="1.5.7"
@@ -93,7 +97,7 @@ for f in "$SRC"/lib/common/*.c "$SRC"/lib/compress/*.c "$SRC"/lib/decompress/*.c
 done
 
 rm -f "$OUT/libzstd.a"
-ar rc "$OUT/libzstd.a" "$BUILD"/*.o
-ranlib "$OUT/libzstd.a" 2>/dev/null || true
+"${AR:-ar}" rc "$OUT/libzstd.a" "$BUILD"/*.o
+"${RANLIB:-ranlib}" "$OUT/libzstd.a" 2>/dev/null || true
 
 echo "wrote $OUT/libzstd.a ($(du -h "$OUT/libzstd.a" | cut -f1))"
