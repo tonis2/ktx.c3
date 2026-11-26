@@ -60,6 +60,7 @@ const uint EAC_R11_SNORM       = 154;
 const uint EAC_R11G11_UNORM    = 155;
 const uint EAC_R11G11_SNORM    = 156;
 const uint ASTC_4X4_UNORM      = 157;
+const uint ASTC_4X4_SRGB       = 158;
 const uint ASTC_12X12_SRGB     = 184;
 
 faultdef UNSUPPORTED_FORMAT;

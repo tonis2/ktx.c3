@@ -8,7 +8,7 @@
 // regenerate from the pre-cutover revision).
 module ktx::basis;
 import ktx::container, ktx::dfd, ktx::util, ktx::uastc, ktx::etc1s, ktx::bc7, ktx::bcn, ktx::mipgen;
-import ktx::uastc_bc7, ktx::etc1s_bc7;
+import ktx::uastc_bc7, ktx::uastc_astc, ktx::etc1s_bc7;
 import std::core::mem;
 
 faultdef ENCODE_FAILED, OPEN_FAILED, TRANSCODE_FAILED, UNSUPPORTED_TARGET;
@@ -21,6 +21,7 @@ const uint UASTC_4X4  = 1;
 const uint TF_BC1_RGB  = 2;
 const uint TF_BC3_RGBA = 3;
 const uint TF_BC7_RGBA = 6;
+const uint TF_ASTC_4X4_RGBA = 10;
 const uint TF_RGBA32   = 13;
 
 // How the extra source images are interpreted by the encoder.
@@ -37,7 +38,16 @@ struct EncodeOptions
 	CInt effort;    // 0..10  (ETC1S compression level / UASTC pack level)
 	bool srgb;
 	bool mipmaps;
+	// How each image's mips are filtered, by image index; an image past the end
+	// gets { .srgb = srgb }. A linear file can hold an sRGB colour layer this
+	// way, beside a normal layer that wants renormalizing.
+	mipgen::Options[] image_mips;
+	// Metadata for the file, copied in. A text value carries its own trailing NUL.
+	container::KvPair[] kv;
 }
+
+fn mipgen::Options EncodeOptions.mips_of(&self, sz image)
+	=> image < self.image_mips.len ? self.image_mips[image] : { .srgb = self.srgb };
 
 <*
  Encode one or more RGBA8 images (each w*h*4 bytes) into an ETC1S or UASTC KTX2
@@ -97,6 +107,7 @@ fn char[]? encode_uastc_c3(Allocator allocator, char[][] images, uint w, uint h,
 		.allocator = tmem,
 	};
 	tex.levels = alloc::new_array(tmem, char[], levels);
+	foreach (pair : opts.kv) tex.kv_set(pair.key, pair.value);
 
 	// Blocks per level, all images of a level concatenated (layer-major, then
 	// face — same as the KTX2 level layout).
@@ -117,7 +128,7 @@ fn char[]? encode_uastc_c3(Allocator allocator, char[][] images, uint w, uint h,
 		{
 			if (l > 0)
 			{
-				mip = mipgen::next_level(tmem, mip, lw, lh, { .srgb = opts.srgb });
+				mip = mipgen::next_level(tmem, mip, lw, lh, opts.mips_of(idx));
 				lw = max(lw >> 1, 1u);
 				lh = max(lh >> 1, 1u);
 			}
@@ -177,7 +188,7 @@ fn char[]? encode_etc1s_c3(Allocator allocator, char[][] images, uint w, uint h,
 		{
 			if (l > 0)
 			{
-				mip = mipgen::next_level(tmem, mip, lw, lh, { .srgb = opts.srgb });
+				mip = mipgen::next_level(tmem, mip, lw, lh, opts.mips_of(idx));
 				lw = max(lw >> 1, 1u);
 				lh = max(lh >> 1, 1u);
 			}
@@ -280,6 +291,7 @@ fn char[]? encode_etc1s_c3(Allocator allocator, char[][] images, uint w, uint h,
 		.allocator = tmem,
 		.levels = level_payloads,
 	};
+	foreach (pair : opts.kv) tex.kv_set(pair.key, pair.value);
 	return container::write(allocator, &tex, { .scheme = container::Scheme.BASIS_LZ, .sgd = sgd });
 }
 
@@ -394,13 +406,18 @@ fn UastcImage? uastc_slice(container::Texture* tex, uint level, uint layer, uint
 <*
  One UASTC image at the given target. RGBA32 is the phase-1 per-block decode,
  bit-exact with basisu's transcoder (test/uastc_test.c3 pins it against golden
- dumps); BC7 is the block mapper; BC1/BC3 decode and re-encode.
+ dumps); BC7 and ASTC are block mappers; BC1/BC3 decode and re-encode.
 *>
 fn Transcoded? uastc_to(Allocator allocator, UastcImage img, uint tf_format, uint threads = 0) @local => @pool()
 {
 	if (tf_format == TF_BC7_RGBA)
 	{
 		char[] blocks = uastc_bc7::map_image(allocator, img.blocks, img.width, img.height, threads)!;
+		return { .data = blocks, .width = img.width, .height = img.height };
+	}
+	if (tf_format == TF_ASTC_4X4_RGBA)
+	{
+		char[] blocks = uastc_astc::map_image(allocator, img.blocks, img.width, img.height, threads)!;
 		return { .data = blocks, .width = img.width, .height = img.height };
 	}
 
@@ -520,10 +537,11 @@ fn Etc1sImage? etc1s_slice(Etc1sFile* f, uint level, uint layer, uint face) @loc
 <*
  One ETC1S image at the given target. RGBA32 is the phase-2 slice decode,
  colour and alpha in the two passes the format keeps them in; BC7 is the block
- mapper; BC1/BC3 decode and re-encode.
+ mapper; BC1/BC3 decode and re-encode. ASTC is UASTC's alone.
 *>
 fn Transcoded? etc1s_to(Allocator allocator, Etc1sImage* img, uint tf_format, uint threads = 0) @local => @pool()
 {
+	if (tf_format == TF_ASTC_4X4_RGBA) return UNSUPPORTED_TARGET~;
 	if (tf_format == TF_BC7_RGBA)
 	{
 		char[] blocks = etc1s_bc7::map_image(allocator, img.cb, img.rgb, img.alpha,
@@ -569,13 +587,16 @@ fn Transcoded? bcn_from_rgba(Allocator allocator, char[] rgba, uint width, uint 
  BC7/BC3, 8 for BC1/BC4) or bytes-per-pixel (4 for TF_RGBA32). The returned
  slice is allocated from `allocator`.
 
- Supported targets: TF_RGBA32, TF_BC1_RGB, TF_BC3_RGBA, TF_BC7_RGBA
- (`unit_bytes` is kept for API stability; it is no longer consulted).
+ Supported targets: TF_RGBA32, TF_BC1_RGB, TF_BC3_RGBA, TF_BC7_RGBA, and
+ TF_ASTC_4X4_RGBA for UASTC (`unit_bytes` is kept for API stability; it is no
+ longer consulted).
 
  **BC7 is a block mapper** (docs/basis-rewrite.md phase 3): both source
  formats are BC7's own shape — endpoints, a weight grid, an index per texel —
  so ktx::uastc_bc7 and ktx::etc1s_bc7 rewrite each block as a BC7 block and
- never build a pixel. Everything else decodes first.
+ never build a pixel. **ASTC is one too**, and a lossless one: a UASTC block is
+ an ASTC block in another layout (ktx::uastc_astc). Everything else decodes
+ first.
 
  A caller wanting a whole mip chain should ask `transcode_levels` for it: this
  reads the file's shared parts — the container index, and for ETC1S the
@@ -591,6 +612,7 @@ fn Transcoded? transcode(Allocator allocator, char[] ktx2, uint level, uint laye
 		case TF_BC1_RGB:
 		case TF_BC3_RGBA:
 		case TF_BC7_RGBA:
+		case TF_ASTC_4X4_RGBA:
 			break;
 		default:
 			return UNSUPPORTED_TARGET~;
@@ -665,6 +687,7 @@ struct Info
 	uint levels;   // >= 1
 	uint layers;   // array layers (0 for a plain 2D texture)
 	uint faces;    // 6 for a cubemap, else 1
+	bool uastc;    // UASTC rather than ETC1S: the one with an ASTC mapper
 }
 
 <* Dimensions and level/layer/face counts of an ETC1S/UASTC KTX2 blob. *>
@@ -682,6 +705,7 @@ fn Info? info(char[] ktx2)
 		.levels = n < 1 ? 1 : n,
 		.layers = util::rd32(ktx2, 32),
 		.faces  = faces < 1 ? 1 : faces,
+		.uastc  = model == dfd::MODEL_UASTC,
 	};
 }
 

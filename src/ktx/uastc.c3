@@ -223,6 +223,12 @@ struct Unpacked
 	char[16] partition;   // subset per texel
 	char[4][2][3] ep;     // [subset][low/high][rgba], unquantized to 0..255
 	char[32] weights;     // [texel * planes + plane]
+	// The endpoints as the block stores them: ASTC integer-sequence values
+	// (bits | trit or quint << bits) at `endpoint_range`, `comps * 2` per subset
+	// with each component's low then high. What an ASTC block holds, unchanged.
+	char[18] ise;
+	uint endpoint_range;
+	uint comps;
 }
 
 <*
@@ -455,6 +461,9 @@ fn void? unpack_block(char[] block, Unpacked* u)
 	u.weight_bits = weight_bits;
 	u.pattern = common_pattern;
 	u.ccs = ccs;
+	u.ise = endpoints;
+	u.endpoint_range = endpoint_range;
+	u.comps = comps;
 }
 
 <*

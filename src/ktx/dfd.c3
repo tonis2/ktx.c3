@@ -165,9 +165,13 @@ fn char[]? create(Allocator allocator, uint format)
 					sample_count = 1;
 					samples[0] = { 0, 128, 0 | flags, lower, upper };
 				default:
-					// ETC2/ASTC writing not needed (no encoder); reading works
-					// because we never regenerate the DFD on read.
-					return UNSUPPORTED_FORMAT~;
+					// ASTC LDR, which the UASTC mapper writes: one opaque 128-bit
+					// sample, as BC7's. ETC2 writing is not needed (no encoder);
+					// reading works because we never regenerate the DFD on read.
+					if (format < vk::ASTC_4X4_UNORM || format > vk::ASTC_12X12_SRGB) return UNSUPPORTED_FORMAT~;
+					model = MODEL_ASTC;
+					sample_count = 1;
+					samples[0] = { 0, 128, 0, lower, upper };
 			}
 	}
 

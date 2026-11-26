@@ -16,6 +16,10 @@ options:
   -m, --mipmap          generate a full mip chain
   -n, --normal-map      inputs are normal maps: mips are renormalized
                         (pairs well with --format bc5)
+      --srgb-layers <list>    these layers' colour is sRGB in a linear format:
+                              their mips filter it in linear light (e.g. 0)
+      --normal-layers <list>  only these layers are normal maps (e.g. 1,2)
+      --kv <key=value>  write one metadata entry (text, NUL added)
   -c, --cube            treat exactly 6 inputs as cubemap faces
       --quality <0-100> etc1s/uastc encode quality (default 90)
       --effort <0-10>   etc1s/uastc encode effort (default 2)
@@ -37,11 +41,17 @@ fn int cmd_create(String[] args)
 	int zstd_level = 0;
 	int quality = 90;
 	int effort = 2;
+	String srgb_layers;
+	String normal_layers;
+	String kv_text;
 
 	int? end = opt::@parse(args,
 		"f", "format", &format_name,
 		"m", "mipmap", &mipmap,
 		"n", "normal-map", &normal_map,
+		null, "srgb-layers", &srgb_layers,
+		null, "normal-layers", &normal_layers,
+		null, "kv", &kv_text,
 		"c", "cube", &cube,
 		null, "quality", &quality,
 		null, "effort", &effort,
@@ -74,6 +84,26 @@ fn int cmd_create(String[] args)
 		return 1;
 	}
 
+	if (!layer_list_ok(srgb_layers, inputs.len) || !layer_list_ok(normal_layers, inputs.len))
+	{
+		io::eprintfn("error: a layer list is comma-separated indices below %d", inputs.len);
+		return 1;
+	}
+	container::KvPair[1] kv_pair;
+	container::KvPair[] kv;
+	if (kv_text.len)
+	{
+		sz eq = kv_text.index_of_char('=') ?? 0;
+		if (eq == 0)
+		{
+			io::eprintn("error: --kv takes key=value");
+			return 1;
+		}
+		kv_pair[0] = { kv_text[:eq], text_value(kv_text[eq + 1..]) };
+		kv = kv_pair[..];
+	}
+	defer if (kv.len) free(kv_pair[0].value);
+
 	// ETC1S/UASTC + BasisLZ is produced by basis_universal, which builds the whole
 	// KTX2 (encode + container + supercompression) itself, so it bypasses the
 	// VkFormat per-level pipeline below.
@@ -84,7 +114,16 @@ fn int cmd_create(String[] args)
 		basis::TexType type = cube
 			? basis::TexType.CUBE
 			: (inputs.len > 1 ? basis::TexType.ARRAY : basis::TexType.D2);
-		basis::EncodeOptions opts = { .quality = quality, .effort = effort, .srgb = bsrgb, .mipmaps = mipmap };
+		mipgen::Options[] mips = layer_mips(inputs.len, bsrgb, normal_map, srgb_layers, normal_layers);
+		defer free(mips);
+		basis::EncodeOptions opts = {
+			.quality = quality,
+			.effort = effort,
+			.srgb = bsrgb,
+			.mipmaps = mipmap,
+			.image_mips = mips,
+			.kv = kv,
+		};
 		if (catch err = create_basis(inputs, output, format_name, bfmt, type, opts))
 		{
 			io::eprintfn("error: %s", err);
@@ -105,7 +144,9 @@ fn int cmd_create(String[] args)
 	if (raw_flag) scheme = container::Scheme.NONE;
 	if (zlib_flag) scheme = container::Scheme.ZLIB;
 
-	if (catch err = create_texture(format, fi, inputs, output, mipmap, normal_map, cube, scheme, zstd_level))
+	mipgen::Options[] mips = layer_mips(inputs.len, fi.srgb, normal_map, srgb_layers, normal_layers);
+	defer free(mips);
+	if (catch err = create_texture(format, fi, inputs, output, mipmap, mips, kv, cube, scheme, zstd_level))
 	{
 		io::eprintfn("error: %s", err);
 		return 1;
@@ -114,7 +155,8 @@ fn int cmd_create(String[] args)
 }
 
 fn void? create_texture(uint format, vk::FormatInfo fi, String[] inputs, String output,
-	bool mipmap, bool normal_map, bool cube, container::Scheme scheme, int zstd_level) @local => @pool()
+	bool mipmap, mipgen::Options[] mips, container::KvPair[] kv, bool cube, container::Scheme scheme,
+	int zstd_level) @local => @pool()
 {
 	// Load every input up front and check they agree on dimensions.
 	image::Image[] images = alloc::new_array(tmem, image::Image, inputs.len);
@@ -147,8 +189,7 @@ fn void? create_texture(uint format, vk::FormatInfo fi, String[] inputs, String 
 		.level_count = levels,
 	})!;
 	defer tex.free();
-
-	mipgen::Options mip_opts = { .srgb = fi.srgb, .renormalize = normal_map };
+	foreach (pair : kv) tex.kv_set(pair.key, pair.value);
 
 	foreach (i, img : images)
 	{
@@ -161,7 +202,7 @@ fn void? create_texture(uint format, vk::FormatInfo fi, String[] inputs, String 
 		{
 			if (l > 0)
 			{
-				char[] next = mipgen::next_level(tmem, rgba, lw, lh, mip_opts);
+				char[] next = mipgen::next_level(tmem, rgba, lw, lh, mips[i]);
 				rgba = next;
 				lw = max(lw >> 1, 1u);
 				lh = max(lh >> 1, 1u);
@@ -212,4 +253,54 @@ fn void? create_basis(String[] inputs, String output, String format_name, uint f
 	}
 	io::printfn("wrote %s: %s + %s %dx%d, %s%s", output, format_name, scheme, w, h,
 		opts.mipmaps ? "mipmapped " : "", shape);
+}
+
+<* Whether `list` is empty or comma-separated indices below `count`. *>
+fn bool layer_list_ok(String list, sz count) @local => @pool()
+{
+	if (!list.len) return true;
+	foreach (part : list.tsplit(","))
+	{
+		int? index = part.trim().to_int();
+		if (catch index) return false;
+		if (index < 0 || index >= count) return false;
+	}
+	return true;
+}
+
+fn bool listed(String list, sz index) @local => @pool()
+{
+	if (!list.len) return false;
+	foreach (part : list.tsplit(","))
+	{
+		if ((part.trim().to_int() ?? -1) == (int)index) return true;
+	}
+	return false;
+}
+
+<*
+ How each input's mips are filtered: the format's space and --normal-map for
+ every one, plus the layers the two lists name.
+
+ @return "One entry per input, from mem"
+*>
+fn mipgen::Options[] layer_mips(sz count, bool srgb, bool normal_map, String srgb_layers, String normal_layers) @local
+{
+	mipgen::Options[] mips = mem::new_array(mipgen::Options, count);
+	foreach (i, &m : mips)
+	{
+		*m = {
+			.srgb = srgb || listed(srgb_layers, i),
+			.renormalize = normal_map || listed(normal_layers, i),
+		};
+	}
+	return mips;
+}
+
+<* A KTX2 text value: the bytes and a trailing NUL, from mem. *>
+fn char[] text_value(String text) @local
+{
+	char[] value = mem::new_array(char, text.len + 1);
+	value[:text.len] = text[..];
+	return value;
 }

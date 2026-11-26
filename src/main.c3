@@ -15,6 +15,7 @@ usage: ktx <command> [options]
 commands:
   create    build a .ktx2 from PNG/JPEG images (mipmaps, BCn, supercompression)
   extract   decode a level/layer/face back to PNG (or raw bytes)
+  transcode ETC1S/UASTC to a plain ASTC, BC7 or RGBA8 KTX2
   info      print header, level index, DFD and metadata
   formats   list encodable formats
   help      this help
@@ -32,6 +33,7 @@ fn int main(String[] args)
 	{
 		case "create":  return cli::cmd_create(args[1..]);
 		case "extract": return cli::cmd_extract(args[1..]);
+		case "transcode": return cli::cmd_transcode(args[1..]);
 		case "info":    return cli::cmd_info(args[1..]);
 		case "formats":
 			cli::print_formats();

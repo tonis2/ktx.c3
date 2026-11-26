@@ -11,7 +11,8 @@ Vulkan-based engines and asset pipelines.
   Output validates clean against the official `ktx validate`.
 - **Supercompression:** Zstandard and ZLIB (pure C3, stdlib deflate) for
   GPU-ready BCn. **ETC1S + BasisLZ** and **UASTC 4x4 + Zstd** encode (2D, mip
-  chains, array layers, cubemaps) plus transcoding to RGBA32/BC1/BC3/BC7 —
+  chains, array layers, cubemaps) plus transcoding to RGBA32/BC1/BC3/BC7, and
+  UASTC to ASTC 4x4 —
   implemented in pure C3 (see below) for small downloads and mobile-GPU
   portability.
 - **GPU block compression, encoders + decoders in pure C3:**
@@ -19,6 +20,9 @@ Vulkan-based engines and asset pipelines.
     reference; encoders use bbox + least-squares refinement (stb_dxt approach).
   - **BC7** (modes 1/5/6 encode, all 8 modes decode) — cross-validated
     byte-for-byte against basis_universal on thousands of blocks.
+- **UASTC to ASTC 4x4**, for GPUs without BC7 (Adreno, Mali, Apple): a
+  lossless block rewrite, since UASTC is a subset of ASTC. Checked pixel for
+  pixel against Arm's `astcenc` decoder by `test/astc-validate.sh`.
 - **Mipmap generation:** box filter, sRGB-correct (filters in linear space),
   optional renormalization for normal maps.
 - **Multithreaded encoding and decoding** (`std::thread`, no extra
@@ -45,6 +49,16 @@ build/ktx create --format bc5 --normal-map --mipmap -o normal.ktx2 normal.png
 # cubemap from 6 faces (+X -X +Y -Y +Z -Z), array textures from N inputs
 build/ktx create --cube --format bc7-srgb -o env.ktx2 px.png nx.png py.png ny.png pz.png nz.png
 
+# a two-layer material: colour+height and normal+roughness in one linear UASTC
+# file. Layer 0's colour is sRGB, so its mips filter in linear light; layer 1's
+# normals are renormalized; the layout goes in as metadata
+build/ktx create --format uastc-linear --mipmap --srgb-layers 0 --normal-layers 1 \
+    --kv "three.layers=srgb rgb=basecolor a=height; linear rgb=normal a=roughness" \
+    -o stone_wall.ktx2 color_height.png normal_roughness.png
+
+# a UASTC file to plain ASTC 4x4 (or bc7 / rgba8), every level, layer and face
+build/ktx transcode -t astc -o albedo_astc.ktx2 albedo_uastc.ktx2
+
 # inspect / decode back to PNG
 build/ktx info albedo.ktx2
 build/ktx extract --level 2 -o mip2.png albedo.ktx2
@@ -63,6 +77,7 @@ compression in shipping builds, `--raw` to disable.
 | Masks / roughness   | `bc4`           | Single channel, 0.5 byte/px                |
 | Grayscale+alpha     | `bc3`           | Legacy fallback                            |
 | UI / exact pixels   | `rgba8-srgb`    | Uncompressed, still Zstd-supercompressed   |
+| Desktop and mobile  | `uastc`         | One file: maps to BC7 or to ASTC 4x4 (lossless) at load |
 
 ## Using the library from another C3 project (e.g. a glTF exporter)
 
@@ -105,6 +120,7 @@ links it — the only native code in the library.
 c3c test                 # unit tests: round-trips, KATs, alignment, DFD bytes
                          # (on macOS: c3c test ktx)
 sh test/cross-validate.sh   # optional: validates output with the official ktx tool
+sh test/astc-validate.sh    # optional: UASTC -> ASTC against Arm's astcenc (set ASTCENC)
 sh test/gen-golden.sh       # regenerate the basis decode oracles in test/golden/
 ```
 
