@@ -15,7 +15,7 @@ usage: ktx <command> [options]
 commands:
   create    build a .ktx2 from PNG/JPEG images (mipmaps, BCn, supercompression)
   extract   decode a level/layer/face back to PNG (or raw bytes)
-  transcode ETC1S/UASTC to a plain ASTC, BC7 or RGBA8 KTX2
+  transcode ETC1S/UASTC to a plain ASTC, BC7, ETC2 or RGBA8 KTX2
   info      print header, level index, DFD and metadata
   formats   list encodable formats
   help      this help

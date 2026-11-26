@@ -11,8 +11,8 @@ Vulkan-based engines and asset pipelines.
   Output validates clean against the official `ktx validate`.
 - **Supercompression:** Zstandard and ZLIB (pure C3, stdlib deflate) for
   GPU-ready BCn. **ETC1S + BasisLZ** and **UASTC 4x4 + Zstd** encode (2D, mip
-  chains, array layers, cubemaps) plus transcoding to RGBA32/BC1/BC3/BC7, and
-  UASTC to ASTC 4x4 —
+  chains, array layers, cubemaps) plus transcoding to RGBA32/BC1/BC3/BC7,
+  UASTC to ASTC 4x4 and ETC1S to ETC1/ETC2 —
   implemented in pure C3 (see below) for small downloads and mobile-GPU
   portability.
 - **GPU block compression, encoders + decoders in pure C3:**
@@ -20,9 +20,19 @@ Vulkan-based engines and asset pipelines.
     reference; encoders use bbox + least-squares refinement (stb_dxt approach).
   - **BC7** (modes 1/5/6 encode, all 8 modes decode) — cross-validated
     byte-for-byte against basis_universal on thousands of blocks.
+  - **ETC2/EAC decode** — every ETC2 RGB mode (individual, differential, T, H,
+    planar), punch-through alpha, EAC A8, R11 and RG11; pixel-identical to
+    Ericsson's reference decoder.
 - **UASTC to ASTC 4x4**, for GPUs without BC7 (Adreno, Mali, Apple): a
   lossless block rewrite, since UASTC is a subset of ASTC. Checked pixel for
   pixel against Arm's `astcenc` decoder by `test/astc-validate.sh`.
+- **ETC1S to ETC1 / ETC2 RGBA**, for the same GPUs: an ETC1S block is an ETC1
+  block, so colour is rewritten losslessly (and byte for byte as basisu writes
+  it). Alpha is fitted to EAC A8: the optimal block for each alpha endpoint
+  and set of selectors used, at most 3 levels off and about half the squared
+  error of basisu's tables. Checked pixel for pixel against
+  Ericsson's reference decoder by `test/etc2-validate.sh`. UASTC files go to
+  ASTC instead and refuse the ETC targets.
 - **Mipmap generation:** box filter, sRGB-correct (filters in linear space),
   optional renormalization for normal maps.
 - **Multithreaded encoding and decoding** (`std::thread`, no extra
@@ -59,6 +69,10 @@ build/ktx create --format uastc-linear --mipmap --srgb-layers 0 --normal-layers 
 # a UASTC file to plain ASTC 4x4 (or bc7 / rgba8), every level, layer and face
 build/ktx transcode -t astc -o albedo_astc.ktx2 albedo_uastc.ktx2
 
+# an ETC1S file to ETC2: RGB if it is opaque, RGBA if it has alpha
+# (-t etc2-rgba forces RGBA); sRGB or linear follows the input
+build/ktx transcode -t etc2 -o albedo_etc2.ktx2 albedo_etc1s.ktx2
+
 # inspect / decode back to PNG
 build/ktx info albedo.ktx2
 build/ktx extract --level 2 -o mip2.png albedo.ktx2
@@ -78,6 +92,7 @@ compression in shipping builds, `--raw` to disable.
 | Grayscale+alpha     | `bc3`           | Legacy fallback                            |
 | UI / exact pixels   | `rgba8-srgb`    | Uncompressed, still Zstd-supercompressed   |
 | Desktop and mobile  | `uastc`         | One file: maps to BC7 or to ASTC 4x4 (lossless) at load |
+| Smallest download   | `etc1s`         | One file: maps to BC7, or to ETC2 (colour lossless) at load |
 
 ## Using the library from another C3 project (e.g. a glTF exporter)
 
@@ -121,6 +136,7 @@ c3c test                 # unit tests: round-trips, KATs, alignment, DFD bytes
                          # (on macOS: c3c test ktx)
 sh test/cross-validate.sh   # optional: validates output with the official ktx tool
 sh test/astc-validate.sh    # optional: UASTC -> ASTC against Arm's astcenc (set ASTCENC)
+sh test/etc2-validate.sh    # optional: ETC1S -> ETC2 and the ETC2 decoder against etcdec (set ETCDEC)
 sh test/gen-golden.sh       # regenerate the basis decode oracles in test/golden/
 ```
 
@@ -178,13 +194,15 @@ basisu's RDO, which the C3 encoder doesn't do yet). Both default to
 
 Encoding and decoding both use every core by default (`ktx::parallel`, a small
 fork-join helper over `std::thread`): UASTC/BC7/BCn encode *and* decode block
-rows in parallel, the two Basis-to-BC7 block mappers map block rows in parallel,
-and the ETC1S k-means/reassignment searches are parallel too.
+rows in parallel, the Basis block mappers map block rows in parallel (the ETC1S
+to ETC2 one searches its EAC alpha blocks in parallel too), and the ETC1S
+k-means/reassignment searches are parallel too.
 Only the searches run concurrently — order-sensitive accumulation stays serial —
 so **output is byte-identical for any thread count**. Library callers can pass
 `threads: 1` (any of `uastc::encode_image`, `etc1s::encode`, `bc7::encode`,
 `bcn::encode`, `uastc::decode_image`, `bc7::decode`, `bcn::decode`,
-`uastc_bc7::map_image`, `etc1s_bc7::map_image`) to force single-threaded
+`uastc_bc7::map_image`, `etc1s_bc7::map_image`, `uastc_astc::map_image`,
+`etc1s_etc2::map_image`, `etc2::decode`) to force single-threaded
 operation.
 
 The decoders are cheap enough per block that spawning a thread can cost more

@@ -8,8 +8,9 @@ import std::io, std::io::file;
 
 const EXTRACT_HELP = `usage: ktx extract [options] -o <out.png> <input.ktx2>
 
-Decodes one image (level/layer/face) to PNG. BC1/BC3/BC4/BC5/BC7 and the
-uncompressed formats decode to RGBA8; ETC2/ASTC payloads only support --raw.
+Decodes one image (level/layer/face) to PNG. BC1/BC3/BC4/BC5/BC7, ETC2, EAC
+R11/RG11 and the uncompressed formats decode to RGBA8; ASTC and the signed
+formats only support --raw.
 
 options:
   -l, --level <n>    mip level (default 0)

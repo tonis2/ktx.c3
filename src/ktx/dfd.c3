@@ -35,7 +35,12 @@ const uint TRANSFER_LINEAR        = 1;
 const uint TRANSFER_SRGB          = 2;
 const uint FLAG_ALPHA_STRAIGHT    = 0;
 
-const uint CHANNEL_ALPHA          = 15;   // RGBSDA alpha channel id
+const uint CHANNEL_ALPHA          = 15;   // RGBSDA alpha channel id, also ETC2's
+const uint CHANNEL_ETC2_RED       = 0;
+const uint CHANNEL_ETC2_GREEN     = 1;
+const uint CHANNEL_ETC2_COLOR     = 2;
+const uint UASTC_RGBA             = 3;    // UASTC channel ids that carry alpha
+const uint UASTC_RRRG             = 5;
 const uint DATATYPE_LINEAR        = 1 << 4;
 const uint DATATYPE_SIGNED        = 1 << 6;
 const uint DATATYPE_FLOAT         = 1 << 7;
@@ -105,6 +110,8 @@ fn char[]? create(Allocator allocator, uint format)
 			{
 				case vk::BC4_SNORM:
 				case vk::BC5_SNORM:
+				case vk::EAC_R11_SNORM:
+				case vk::EAC_R11G11_SNORM:
 					flags = DATATYPE_SIGNED;
 					upper = 0x7FFFFFFF;
 					lower = 0x80000000;
@@ -164,10 +171,38 @@ fn char[]? create(Allocator allocator, uint format)
 					model = MODEL_BC7;
 					sample_count = 1;
 					samples[0] = { 0, 128, 0 | flags, lower, upper };
+				case vk::ETC2_R8G8B8_UNORM:
+				case vk::ETC2_R8G8B8_SRGB:
+					model = MODEL_ETC2;
+					sample_count = 1;
+					samples[0] = { 0, 64, CHANNEL_ETC2_COLOR, lower, upper };
+				case vk::ETC2_R8G8B8A1_UNORM:
+				case vk::ETC2_R8G8B8A1_SRGB:
+					// Punch-through alpha is an alpha sample on the colour's own bits.
+					model = MODEL_ETC2;
+					sample_count = 2;
+					samples[0] = { 0, 64, CHANNEL_ETC2_COLOR, lower, upper };
+					samples[1] = { 0, 64, alpha, lower, upper };
+				case vk::ETC2_R8G8B8A8_UNORM:
+				case vk::ETC2_R8G8B8A8_SRGB:
+					model = MODEL_ETC2;
+					sample_count = 2;
+					samples[0] = { 0, 64, alpha, lower, upper };
+					samples[1] = { 64, 64, CHANNEL_ETC2_COLOR, lower, upper };
+				case vk::EAC_R11_UNORM:
+				case vk::EAC_R11_SNORM:
+					model = MODEL_ETC2;
+					sample_count = 1;
+					samples[0] = { 0, 64, CHANNEL_ETC2_RED | flags, lower, upper };
+				case vk::EAC_R11G11_UNORM:
+				case vk::EAC_R11G11_SNORM:
+					model = MODEL_ETC2;
+					sample_count = 2;
+					samples[0] = { 0, 64, CHANNEL_ETC2_RED | flags, lower, upper };
+					samples[1] = { 64, 64, CHANNEL_ETC2_GREEN | flags, lower, upper };
 				default:
 					// ASTC LDR, which the UASTC mapper writes: one opaque 128-bit
-					// sample, as BC7's. ETC2 writing is not needed (no encoder);
-					// reading works because we never regenerate the DFD on read.
+					// sample, as BC7's.
 					if (format < vk::ASTC_4X4_UNORM || format > vk::ASTC_12X12_SRGB) return UNSUPPORTED_FORMAT~;
 					model = MODEL_ASTC;
 					sample_count = 1;

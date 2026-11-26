@@ -10,9 +10,12 @@ Transcodes every level, layer and face of an ETC1S or UASTC KTX2 into a plain
 KTX2. The input's sRGB or linear transfer and its metadata carry over.
 
 targets:
-  astc     ASTC 4x4, for GPUs without BC7 (UASTC inputs only; lossless)
-  bc7      BC7
-  rgba8    uncompressed RGBA8
+  astc       ASTC 4x4, for GPUs without BC7 (UASTC inputs only; lossless)
+  bc7        BC7
+  etc2       ETC2 RGB, or ETC2 RGBA when the input has alpha, for GPUs without
+             BC7 (ETC1S inputs only; colour lossless, alpha fitted to EAC)
+  etc2-rgba  ETC2 RGBA even for an opaque input (alpha 255)
+  rgba8      uncompressed RGBA8
 
 options:
   -t, --target <name>
@@ -84,16 +87,29 @@ fn void? transcode_file(String input, String output, String target, container::S
 		case "bc7":
 			tf = basis::TF_BC7_RGBA;
 			format = srgb ? vk::BC7_SRGB : vk::BC7_UNORM;
+		case "etc2":
+			if (bi.alpha) nextcase "etc2-rgba";
+			// Opaque ETC1S is ETC1, which Vulkan names as ETC2 RGB.
+			tf = basis::TF_ETC1_RGB;
+			format = srgb ? vk::ETC2_R8G8B8_SRGB : vk::ETC2_R8G8B8_UNORM;
+		case "etc2-rgba":
+			tf = basis::TF_ETC2_RGBA;
+			format = srgb ? vk::ETC2_R8G8B8A8_SRGB : vk::ETC2_R8G8B8A8_UNORM;
 		case "rgba8":
 			tf = basis::TF_RGBA32;
 			format = srgb ? vk::R8G8B8A8_SRGB : vk::R8G8B8A8_UNORM;
 		default:
-			io::eprintfn("unknown target '%s' (astc, bc7 or rgba8)", target);
+			io::eprintfn("unknown target '%s' (astc, bc7, etc2, etc2-rgba or rgba8)", target);
 			return BAD_ARGUMENTS~;
 	}
 	if (tf == basis::TF_ASTC_4X4_RGBA && df.model != dfd::MODEL_UASTC)
 	{
 		io::eprintn("astc needs a UASTC input; ETC1S has no ASTC mapper");
+		return BAD_ARGUMENTS~;
+	}
+	if ((tf == basis::TF_ETC1_RGB || tf == basis::TF_ETC2_RGBA) && df.model != dfd::MODEL_ETC1S)
+	{
+		io::eprintn("etc2 needs an ETC1S input; UASTC maps to astc instead");
 		return BAD_ARGUMENTS~;
 	}
 

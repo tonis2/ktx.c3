@@ -16,7 +16,13 @@ if [ -z "$KTX_OFFICIAL" ]; then
     exit 1
 fi
 
-c3c build
+# The CLI target per platform (project.json): macOS links its own zstd.
+case $(uname) in
+    Darwin) TARGET=ktx ;;
+    *) TARGET=ktx-linux ;;
+esac
+c3c build $TARGET
+KTX=build/$TARGET
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -40,7 +46,7 @@ fail=0
 for fmt in rgba8-srgb rgb8 bc1-srgb bc3-srgb bc4 bc5 bc7-srgb; do
     for extra in "--raw" "" "--zlib"; do
         out="$TMP/$fmt$extra.ktx2"
-        build/ktx create --format "$fmt" --mipmap $extra -o "$out" "$TMP/in.png" > /dev/null
+        "$KTX" create --format "$fmt" --mipmap $extra -o "$out" "$TMP/in.png" > /dev/null
         if "$KTX_OFFICIAL" validate "$out" > "$TMP/log" 2>&1; then
             echo "OK   $fmt ${extra:-—zstd}"
         else
@@ -52,11 +58,31 @@ done
 # encoder — and BasisLZ for ETC1S via bundled basisu).
 for fmt in uastc etc1s; do
     out="$TMP/$fmt.ktx2"
-    build/ktx create --format "$fmt" --mipmap -o "$out" "$TMP/in.png" > /dev/null
+    "$KTX" create --format "$fmt" --mipmap -o "$out" "$TMP/in.png" > /dev/null
     if "$KTX_OFFICIAL" validate "$out" > "$TMP/log" 2>&1; then
         echo "OK   $fmt"
     else
         echo "FAIL $fmt"; cat "$TMP/log"; fail=1
     fi
+done
+# Transcoded files: a DFD per target, sRGB and linear, with and without alpha.
+cp test/images/alpha.png "$TMP/alpha.png"
+for src in in alpha; do
+    for basis in etc1s etc1s-linear uastc uastc-linear; do
+        "$KTX" create --format "$basis" --mipmap -o "$TMP/$src-$basis.ktx2" "$TMP/$src.png" > /dev/null
+        case $basis in
+            etc1s*) targets="etc2 etc2-rgba bc7 rgba8" ;;
+            *) targets="astc bc7 rgba8" ;;
+        esac
+        for target in $targets; do
+            out="$TMP/$src-$basis-$target.ktx2"
+            "$KTX" transcode -t "$target" -o "$out" "$TMP/$src-$basis.ktx2" > /dev/null
+            if "$KTX_OFFICIAL" validate "$out" > "$TMP/log" 2>&1; then
+                echo "OK   $src $basis -> $target"
+            else
+                echo "FAIL $src $basis -> $target"; cat "$TMP/log"; fail=1
+            fi
+        done
+    done
 done
 exit $fail

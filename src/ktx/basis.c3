@@ -8,7 +8,7 @@
 // regenerate from the pre-cutover revision).
 module ktx::basis;
 import ktx::container, ktx::dfd, ktx::util, ktx::uastc, ktx::etc1s, ktx::bc7, ktx::bcn, ktx::mipgen;
-import ktx::uastc_bc7, ktx::uastc_astc, ktx::etc1s_bc7;
+import ktx::uastc_bc7, ktx::uastc_astc, ktx::etc1s_bc7, ktx::etc1s_etc2;
 import std::core::mem;
 
 faultdef ENCODE_FAILED, OPEN_FAILED, TRANSCODE_FAILED, UNSUPPORTED_TARGET;
@@ -17,7 +17,9 @@ faultdef ENCODE_FAILED, OPEN_FAILED, TRANSCODE_FAILED, UNSUPPORTED_TARGET;
 const uint ETC1S      = 0;
 const uint UASTC_4X4  = 1;
 
-// Transcoder target texture formats (TF_*).
+// Transcoder target texture formats (TF_*), numbered as basisu's transcoder_texture_format.
+const uint TF_ETC1_RGB = 0;
+const uint TF_ETC2_RGBA = 1;
 const uint TF_BC1_RGB  = 2;
 const uint TF_BC3_RGBA = 3;
 const uint TF_BC7_RGBA = 6;
@@ -406,10 +408,13 @@ fn UastcImage? uastc_slice(container::Texture* tex, uint level, uint layer, uint
 <*
  One UASTC image at the given target. RGBA32 is the phase-1 per-block decode,
  bit-exact with basisu's transcoder (test/uastc_test.c3 pins it against golden
- dumps); BC7 and ASTC are block mappers; BC1/BC3 decode and re-encode.
+ dumps); BC7 and ASTC are block mappers; BC1/BC3 decode and re-encode. The ETC
+ targets are refused: a GPU with ETC2 takes ASTC, which UASTC maps to
+ losslessly, while UASTC's ETC1 hints only guide a lossy re-encode.
 *>
 fn Transcoded? uastc_to(Allocator allocator, UastcImage img, uint tf_format, uint threads = 0) @local => @pool()
 {
+	if (tf_format == TF_ETC1_RGB || tf_format == TF_ETC2_RGBA) return UNSUPPORTED_TARGET~;
 	if (tf_format == TF_BC7_RGBA)
 	{
 		char[] blocks = uastc_bc7::map_image(allocator, img.blocks, img.width, img.height, threads)!;
@@ -536,17 +541,27 @@ fn Etc1sImage? etc1s_slice(Etc1sFile* f, uint level, uint layer, uint face) @loc
 
 <*
  One ETC1S image at the given target. RGBA32 is the phase-2 slice decode,
- colour and alpha in the two passes the format keeps them in; BC7 is the block
- mapper; BC1/BC3 decode and re-encode. ASTC is UASTC's alone.
+ colour and alpha in the two passes the format keeps them in; BC7, ETC1 and
+ ETC2 are block mappers; BC1/BC3 decode and re-encode. ASTC is UASTC's alone.
 *>
 fn Transcoded? etc1s_to(Allocator allocator, Etc1sImage* img, uint tf_format, uint threads = 0) @local => @pool()
 {
-	if (tf_format == TF_ASTC_4X4_RGBA) return UNSUPPORTED_TARGET~;
-	if (tf_format == TF_BC7_RGBA)
+	switch (tf_format)
 	{
-		char[] blocks = etc1s_bc7::map_image(allocator, img.cb, img.rgb, img.alpha,
-			img.width, img.height, tmem, threads)!;
-		return { .data = blocks, .width = img.width, .height = img.height };
+		case TF_ASTC_4X4_RGBA:
+			return UNSUPPORTED_TARGET~;
+		case TF_BC7_RGBA:
+			char[] blocks = etc1s_bc7::map_image(allocator, img.cb, img.rgb, img.alpha,
+				img.width, img.height, tmem, threads)!;
+			return { .data = blocks, .width = img.width, .height = img.height };
+		case TF_ETC1_RGB:
+		case TF_ETC2_RGBA:
+			etc1s_etc2::Target target = tf_format == TF_ETC1_RGB ? ETC1_RGB : ETC2_RGBA;
+			char[] blocks = etc1s_etc2::map_image(allocator, img.cb, img.rgb, img.alpha,
+				img.width, img.height, target, tmem, threads)!;
+			return { .data = blocks, .width = img.width, .height = img.height };
+		default:
+			break;
 	}
 
 	Allocator target = tf_format == TF_RGBA32 ? allocator : tmem;
@@ -587,16 +602,17 @@ fn Transcoded? bcn_from_rgba(Allocator allocator, char[] rgba, uint width, uint 
  BC7/BC3, 8 for BC1/BC4) or bytes-per-pixel (4 for TF_RGBA32). The returned
  slice is allocated from `allocator`.
 
- Supported targets: TF_RGBA32, TF_BC1_RGB, TF_BC3_RGBA, TF_BC7_RGBA, and
- TF_ASTC_4X4_RGBA for UASTC (`unit_bytes` is kept for API stability; it is no
- longer consulted).
+ Supported targets: TF_RGBA32, TF_BC1_RGB, TF_BC3_RGBA, TF_BC7_RGBA,
+ TF_ASTC_4X4_RGBA for UASTC, and TF_ETC1_RGB and TF_ETC2_RGBA for ETC1S
+ (`unit_bytes` is kept for API stability; it is no longer consulted).
 
  **BC7 is a block mapper** (docs/basis-rewrite.md phase 3): both source
  formats are BC7's own shape — endpoints, a weight grid, an index per texel —
  so ktx::uastc_bc7 and ktx::etc1s_bc7 rewrite each block as a BC7 block and
  never build a pixel. **ASTC is one too**, and a lossless one: a UASTC block is
- an ASTC block in another layout (ktx::uastc_astc). Everything else decodes
- first.
+ an ASTC block in another layout (ktx::uastc_astc). **So are ETC1 and ETC2**
+ for ETC1S, whose blocks are ETC1 blocks; only ETC2's EAC alpha is fitted
+ (ktx::etc1s_etc2). Everything else decodes first.
 
  A caller wanting a whole mip chain should ask `transcode_levels` for it: this
  reads the file's shared parts — the container index, and for ETC1S the
@@ -608,6 +624,8 @@ fn Transcoded? transcode(Allocator allocator, char[] ktx2, uint level, uint laye
 	if (model != dfd::MODEL_UASTC && model != dfd::MODEL_ETC1S) return OPEN_FAILED~;
 	switch (tf_format)
 	{
+		case TF_ETC1_RGB:
+		case TF_ETC2_RGBA:
 		case TF_RGBA32:
 		case TF_BC1_RGB:
 		case TF_BC3_RGBA:
@@ -688,6 +706,7 @@ struct Info
 	uint layers;   // array layers (0 for a plain 2D texture)
 	uint faces;    // 6 for a cubemap, else 1
 	bool uastc;    // UASTC rather than ETC1S: the one with an ASTC mapper
+	bool alpha;    // the DFD declares alpha: an ETC1S alpha slice, or UASTC RGBA / RRRG
 }
 
 <* Dimensions and level/layer/face counts of an ETC1S/UASTC KTX2 blob. *>
@@ -706,7 +725,22 @@ fn Info? info(char[] ktx2)
 		.layers = util::rd32(ktx2, 32),
 		.faces  = faces < 1 ? 1 : faces,
 		.uastc  = model == dfd::MODEL_UASTC,
+		.alpha  = dfd_alpha(ktx2),
 	};
+}
+
+<*
+ Whether a basis file's DFD declares alpha: ETC1S gives it a second sample,
+ UASTC a channel id of RGBA or RRRG on its one sample.
+*>
+fn bool dfd_alpha(char[] ktx2) @local
+{
+	uint dfd_off = util::rd32(ktx2, 48);
+	uint dfd_len = util::rd32(ktx2, 52);
+	if (dfd_len < 44 || (sz)dfd_off + dfd_len > ktx2.len) return false;
+	char[] d = ktx2[dfd_off:dfd_len];
+	if (d[12] == dfd::MODEL_UASTC) return d[31] == dfd::UASTC_RGBA || d[31] == dfd::UASTC_RRRG;
+	return (dfd::parse(d).sample_count ?? 0) > 1;
 }
 
 <* Number of mip levels in an ETC1S/UASTC KTX2 blob (>= 1). *>

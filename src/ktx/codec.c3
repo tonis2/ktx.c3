@@ -2,7 +2,7 @@
 // Shared by the CLI and the C API (src/capi); depends only on ktx::* modules,
 // so it stays free of image.c3l / getopt.
 module ktx::codec;
-import ktx::vk, ktx::bcn, ktx::bc7, ktx::basis;
+import ktx::vk, ktx::bcn, ktx::bc7, ktx::etc2, ktx::basis;
 
 faultdef UNKNOWN_FORMAT, UNSUPPORTED_INPUT;
 
@@ -135,7 +135,10 @@ fn char[]? encode_image(Allocator allocator, uint format, char[] rgba, uint w, u
 	}
 }
 
-<* Decode one image of the texture back to RGBA8. *>
+<*
+ Decode one image of the texture back to RGBA8. The signed BC4, BC5 and EAC
+ formats are refused: their values don't fit unsigned bytes.
+*>
 fn char[]? decode_image(Allocator allocator, uint format, char[] data, uint w, uint h)
 {
 	vk::FormatInfo fi = vk::info(format)!;
@@ -157,6 +160,19 @@ fn char[]? decode_image(Allocator allocator, uint format, char[] data, uint w, u
 		case vk::BC7_UNORM:
 		case vk::BC7_SRGB:
 			return bc7::decode(allocator, data, w, h);
+		case vk::ETC2_R8G8B8_UNORM:
+		case vk::ETC2_R8G8B8_SRGB:
+			return etc2::decode(allocator, RGB, data, w, h);
+		case vk::ETC2_R8G8B8A1_UNORM:
+		case vk::ETC2_R8G8B8A1_SRGB:
+			return etc2::decode(allocator, RGB_A1, data, w, h);
+		case vk::ETC2_R8G8B8A8_UNORM:
+		case vk::ETC2_R8G8B8A8_SRGB:
+			return etc2::decode(allocator, RGBA, data, w, h);
+		case vk::EAC_R11_UNORM:
+			return etc2::decode(allocator, R11, data, w, h);
+		case vk::EAC_R11G11_UNORM:
+			return etc2::decode(allocator, RG11, data, w, h);
 		default:
 			break;
 	}
