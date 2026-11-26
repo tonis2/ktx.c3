@@ -18,6 +18,7 @@
 //     does is swapped and its weights inverted, which decodes to the same pixels.
 module ktx::uastc_astc;
 import ktx::uastc, ktx::parallel;
+import std::thread;
 
 excuse INVALID_SIZE;
 
@@ -50,7 +51,7 @@ Partition[uastc::TOTAL_PATTERNS2_3] part23 @local;
 char[243] trit_code @local;
 char[125] quint_code @local;
 
-bool ready @local;
+OnceFlag tables_once @local;
 
 fn uint hash52(uint p) @local
 {
@@ -229,37 +230,37 @@ fn uint[3] decode_quints(uint q) @local
 }
 
 <*
- Build the partition seeds and the trit and quint codes. Called once from
- `map_image` before it goes parallel; not thread-safe.
+ Build the partition seeds and the trit and quint codes, once per process, on
+ whichever thread asks first: two images can be mapped on two threads at once.
 *>
 fn void init() @local
 {
-	if (ready) return;
-	for (uint i = 0; i < uastc::TOTAL_PATTERNS2; i++) part2[i] = find_seed(uastc::PATTERNS2[i * 16 : 16], 2);
-	for (uint i = 0; i < uastc::TOTAL_PATTERNS3; i++) part3[i] = find_seed(uastc::PATTERNS3[i * 16 : 16], 3);
-	for (uint i = 0; i < uastc::TOTAL_PATTERNS2_3; i++) part23[i] = find_seed(uastc::PATTERNS2_3[i * 16 : 16], 2);
+	tables_once.call(fn void() {
+		for (uint i = 0; i < uastc::TOTAL_PATTERNS2; i++) part2[i] = find_seed(uastc::PATTERNS2[i * 16 : 16], 2);
+		for (uint i = 0; i < uastc::TOTAL_PATTERNS3; i++) part3[i] = find_seed(uastc::PATTERNS3[i * 16 : 16], 3);
+		for (uint i = 0; i < uastc::TOTAL_PATTERNS2_3; i++) part23[i] = find_seed(uastc::PATTERNS2_3[i * 16 : 16], 2);
 
-	// Inverted from the decoders, first code wins: several codes decode to the
-	// same digits and any of them is a valid encoding.
-	bool[243] have_trit;
-	for (uint t = 0; t < 256; t++)
-	{
-		uint[5] d = decode_trits(t);
-		uint i = d[0] + 3 * d[1] + 9 * d[2] + 27 * d[3] + 81 * d[4];
-		if (have_trit[i]) continue;
-		have_trit[i] = true;
-		trit_code[i] = (char)t;
-	}
-	bool[125] have_quint;
-	for (uint q = 0; q < 128; q++)
-	{
-		uint[3] d = decode_quints(q);
-		uint i = d[0] + 5 * d[1] + 25 * d[2];
-		if (have_quint[i]) continue;
-		have_quint[i] = true;
-		quint_code[i] = (char)q;
-	}
-	ready = true;
+		// Inverted from the decoders, first code wins: several codes decode to the
+		// same digits and any of them is a valid encoding.
+		bool[243] have_trit;
+		for (uint t = 0; t < 256; t++)
+		{
+			uint[5] d = decode_trits(t);
+			uint i = d[0] + 3 * d[1] + 9 * d[2] + 27 * d[3] + 81 * d[4];
+			if (have_trit[i]) continue;
+			have_trit[i] = true;
+			trit_code[i] = (char)t;
+		}
+		bool[125] have_quint;
+		for (uint q = 0; q < 128; q++)
+		{
+			uint[3] d = decode_quints(q);
+			uint i = d[0] + 5 * d[1] + 25 * d[2];
+			if (have_quint[i]) continue;
+			have_quint[i] = true;
+			quint_code[i] = (char)q;
+		}
+	});
 }
 
 <* The partition `init` found for this block's pattern. *>

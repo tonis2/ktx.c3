@@ -19,6 +19,7 @@
 // leans harder on the endpoint fit, and alpha gets 8-bit endpoints of its own.
 module ktx::etc1s_bc7;
 import ktx::etc1s, ktx::bc7, ktx::parallel;
+import std::thread;
 
 faultdef INVALID_SIZE;
 
@@ -52,47 +53,48 @@ struct EpM5
 	char[3] hi;
 }
 
-bool ready @local;
+OnceFlag tables_once @local;
 
+<* Build the tables above, once per process, on whichever thread asks first. *>
 fn void init() @local
 {
-	if (ready) return;
-	for (uint t = 0; t < 8; t++)
-	{
-		for (uint b = 0; b < 32; b++)
+	tables_once.call(fn void() {
+		for (uint t = 0; t < 8; t++)
 		{
-			int base = (int)((b << 3) | (b >> 2));
-			for (uint s = 0; s < 4; s++)
+			for (uint b = 0; b < 32; b++)
 			{
-				int v = base + etc1s::INTEN_TABLES[t][s];
-				pal_lut[t][b][s] = (char)(v < 0 ? 0 : (v > 255 ? 255 : v));
+				int base = (int)((b << 3) | (b >> 2));
+				for (uint s = 0; s < 4; s++)
+				{
+					int v = base + etc1s::INTEN_TABLES[t][s];
+					pal_lut[t][b][s] = (char)(v < 0 ? 0 : (v > 255 ? 255 : v));
+				}
 			}
 		}
-	}
-	for (uint w = 0; w <= 64; w++)
-	{
-		uint best;
-		uint best_err = 1000;
-		for (uint j = 0; j < 16; j++)
+		for (uint w = 0; w <= 64; w++)
 		{
-			uint d = bc7::WEIGHTS4[j] > w ? bc7::WEIGHTS4[j] - w : w - bc7::WEIGHTS4[j];
-			if (d < best_err) { best_err = d; best = j; }
+			uint best;
+			uint best_err = 1000;
+			for (uint j = 0; j < 16; j++)
+			{
+				uint d = bc7::WEIGHTS4[j] > w ? bc7::WEIGHTS4[j] - w : w - bc7::WEIGHTS4[j];
+				if (d < best_err) { best_err = d; best = j; }
+			}
+			near4[w] = (char)best;
 		}
-		near4[w] = (char)best;
-	}
-	for (uint t = 0; t < 256; t++)
-	{
-		uint best;
-		uint best_err = 1000;
-		for (uint v = 0; v < 128; v++)
+		for (uint t = 0; t < 256; t++)
 		{
-			uint d = bc7::dequant(v, 7);
-			uint e = d > t ? d - t : t - d;
-			if (e < best_err) { best_err = e; best = v; }
+			uint best;
+			uint best_err = 1000;
+			for (uint v = 0; v < 128; v++)
+			{
+				uint d = bc7::dequant(v, 7);
+				uint e = d > t ? d - t : t - d;
+				if (e < best_err) { best_err = e; best = v; }
+			}
+			q7[t] = (char)best;
 		}
-		q7[t] = (char)best;
-	}
-	ready = true;
+	});
 }
 
 fn int clamp255(long v) @local

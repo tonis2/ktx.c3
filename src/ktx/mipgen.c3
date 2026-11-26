@@ -6,7 +6,7 @@
 // unit-length vectors (matters for BC5 two-channel normal storage).
 module ktx::mipgen;
 import ktx::parallel;
-import std::math;
+import std::math, std::thread;
 
 struct Options
 {
@@ -58,9 +58,8 @@ fn char[] next_level(Allocator allocator, char[] rgba, uint width, uint height, 
 	uint dh = max(height >> 1, 1u);
 	char[] out = alloc::new_array(allocator, char, (sz)dw * dh * 4);
 
-	// Built here rather than inside a row: the table is lazy and a spawned row
-	// would race the others to fill it.
-	if (opts.srgb) srgb_to_linear(0);
+	// Here rather than per sample, which would ask the OnceFlag every time.
+	if (opts.srgb) init_lut();
 
 	LevelJob job = { .rgba = rgba, .out = out, .width = width, .height = height, .dw = dw, .opts = opts };
 	uint use = parallel::shares((sz)dw * dh, MIN_PIXELS_PER_THREAD, threads);
@@ -129,21 +128,22 @@ fn void level_row(void* ctx, usz row) @local
 }
 
 float[256] linear_lut @local;
-bool lut_ready @local;
+OnceFlag lut_once @local;
 
-fn float srgb_to_linear(char v) @local
+<* Build linear_lut, once per process, on whichever thread asks first. *>
+fn void init_lut() @local
 {
-	if (!lut_ready)
-	{
+	lut_once.call(fn void() {
 		for (uint i = 0; i < 256; ++i)
 		{
 			float f = (float)i / 255.0f;
 			linear_lut[i] = f <= 0.04045f ? f / 12.92f : math::pow((f + 0.055f) / 1.055f, 2.4f);
 		}
-		lut_ready = true;
-	}
-	return linear_lut[v];
+	});
 }
+
+<* Needs init_lut() first. *>
+fn float srgb_to_linear(char v) @local => linear_lut[v];
 
 fn char linear_to_srgb(float f) @local
 {

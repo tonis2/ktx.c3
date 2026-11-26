@@ -39,6 +39,13 @@ struct Endpoint
 	char inten5;      // intensity table index (0..7)
 }
 
+<*
+ Whether red, green and blue are equal.
+
+ @return "True for a grey endpoint, which decodes the same through any channel"
+*>
+fn bool Endpoint.is_grey(self) => self.color5[0] == self.color5[1] && self.color5[1] == self.color5[2];
+
 struct Selector
 {
 	char[4] rows;   // row y: pixel x's 2-bit selector at bits x*2
@@ -451,6 +458,7 @@ struct EncBlock @local
 	char[16] levels;   // chosen per-pixel selector levels for its endpoint
 	uint endpoint;     // codebook assignments
 	uint selector;
+	bool alpha;        // from an alpha slice: its endpoint must be grey
 }
 
 <* The 4 level colors an endpoint reconstructs to. *>
@@ -474,14 +482,15 @@ fn void endpoint_colors(Endpoint ep, char[3][4]* colors) @local
 *>
 fn Endpoint fit_endpoint(char[] rgb) @local
 {
-	usz n = rgb.len / 3;
-	uint[3] sum;
+	// 64 bits: one cluster can hold every block of a large flat image.
+	ulong n = rgb.len / 3;
+	ulong[3] sum;
 	for (usz i = 0; i < n; i++)
 	{
 		for (uint c = 0; c < 3; c++) sum[c] += rgb[i * 3 + c];
 	}
 	int[3] avg5;
-	for (uint c = 0; c < 3; c++) avg5[c] = (int)((sum[c] * 31 + (uint)n * 127) / ((uint)n * 255));
+	for (uint c = 0; c < 3; c++) avg5[c] = (int)((sum[c] * 31 + n * 127) / (n * 255));
 
 	Endpoint best;
 	ulong best_err = ~(ulong)0;
@@ -529,6 +538,64 @@ fn Endpoint fit_endpoint(char[] rgb) @local
 		}
 	}
 	return best;
+}
+
+<*
+ Best grey endpoint (R = G = B) for alpha texels, (a, a, a) triples:
+ fit_endpoint's search on the grey diagonal only. For grey input it is the
+ endpoint fit_endpoint finds too, since no mixed candidate beats the best grey one.
+*>
+fn Endpoint fit_grey_endpoint(char[] rgb) @local
+{
+	ulong n = rgb.len / 3;
+	ulong sum;
+	for (usz i = 0; i < n; i++) sum += rgb[i * 3];
+	int avg5 = (int)((sum * 31 + n * 127) / (n * 255));
+
+	Endpoint best;
+	ulong best_err = ulong::max;
+	for (uint inten = 0; inten < 8; inten++)
+	{
+		for (int d = -1; d <= 1; d++)
+		{
+			char v5 = (char)math::clamp(avg5 + d, 0, 31);
+			int base = v5 << 3 | v5 >> 2;
+			ulong err;
+			for (usz i = 0; i < n; i++)
+			{
+				char v = rgb[i * 3];
+				uint pe = uint::max;
+				foreach (t : INTEN_TABLES[inten])
+				{
+					int dd = (int)clamp255(base + t) - (int)v;
+					pe = min(pe, (uint)(dd * dd));
+				}
+				err += pe;
+				if (err >= best_err) break;
+			}
+			if (err < best_err)
+			{
+				best_err = err;
+				best = { .color5 = { v5, v5, v5 }, .inten5 = (char)inten };
+			}
+		}
+	}
+	return best;
+}
+
+<* The member blocks' texels as RGB triples, written into `out`. *>
+fn char[] gather_texels(char[] out, EncBlock[] blocks, uint[] members) @local
+{
+	usz n;
+	foreach (i : members)
+	{
+		foreach (p : blocks[i].px)
+		{
+			out[n : 3] = p[..];
+			n += 3;
+		}
+	}
+	return out[:n];
 }
 
 <* Per-pixel best levels for a block against an endpoint; returns the error. *>
@@ -741,7 +808,10 @@ fn uint kmeans_endpoints(EncBlock[] blocks, uint k, Allocator scratch, uint thre
 		ulong luma = (ulong)(b.mean[0] + b.mean[1] + b.mean[2]);
 		order[i] = (luma << 32) | (ulong)i;
 	}
-	sort::quicksort(order, fn int(ulong a, ulong b) => a < b ? -1 : (a > b ? 1 : 0));
+	// Mergesort, here and for the other keys: the stdlib quicksort pivots on the
+	// first element, so keys already in order (a flat image's) take quadratic
+	// time. The keys are unique, so any sort gives the same order.
+	sort::mergesort(order);
 
 	float[3][] centers = alloc::new_array(scratch, float[3], (sz)k);
 	for (uint c = 0; c < k; c++)
@@ -823,7 +893,7 @@ fn uint kmeans_selectors(EncBlock[] blocks, uint k, Allocator scratch, uint thre
 		for (uint t = 0; t < 16; t++) s += b.levels[t];
 		order[i] = (s << 32) | (ulong)i;
 	}
-	sort::quicksort(order, fn int(ulong a, ulong b) => a < b ? -1 : (a > b ? 1 : 0));
+	sort::mergesort(order);
 
 	float[16][] centers = alloc::new_array(scratch, float[16], (sz)k);
 	for (uint c = 0; c < k; c++)
@@ -1172,6 +1242,7 @@ fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality, uint th
 			for (uint bx = 0; bx < nbx; bx++)
 			{
 				EncBlock* b = &blocks[bi++];
+				b.alpha = s.alpha;
 				uint[3] sum;
 				for (uint y = 0; y < 4; y++)
 				{
@@ -1204,9 +1275,12 @@ fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality, uint th
 	cluster_targets(quality, (uint)total_blocks, &target_e, &target_s);
 	uint num_e = kmeans_endpoints(blocks, target_e, tmem, threads);
 
-	Endpoint[] eps = alloc::new_array(tmem, Endpoint, (sz)num_e);
+	// Refit each cluster over its member pixels. Alpha decoders read one
+	// channel, basisu's red and ours green, so an alpha endpoint must be grey:
+	// where colour blocks pull a cluster's fit off grey, its alpha blocks move
+	// to a cluster of their own, a twin.
+	Endpoint[] eps = alloc::new_array(tmem, Endpoint, (sz)num_e * 2);
 	{
-		// Bucket blocks by cluster, refit each over its member pixels.
 		uint[] counts = alloc::new_array(tmem, uint, (sz)num_e);
 		foreach (&b : blocks) counts[b.endpoint]++;
 		usz[] offs = alloc::new_array(tmem, usz, (sz)num_e);
@@ -1221,23 +1295,32 @@ fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality, uint th
 		foreach (i, &b : blocks) members[offs[b.endpoint] + fill[b.endpoint]++] = (uint)i;
 
 		char[] scratch = alloc::new_array(tmem, char, (sz)total_blocks * 48);
+		uint total = num_e;
 		for (uint c = 0; c < num_e; c++)
 		{
-			if (!counts[c]) continue;
-			usz n;
-			for (usz m = 0; m < counts[c]; m++)
+			uint[] cluster = members[offs[c] : counts[c]];
+			if (!cluster.len) continue;
+			usz alphas;
+			foreach (i : cluster) if (blocks[i].alpha) alphas++;
+			char[] texels = gather_texels(scratch, blocks, cluster);
+			eps[c] = alphas == cluster.len ? fit_grey_endpoint(texels) : fit_endpoint(texels);
+			if (!alphas || eps[c].is_grey()) continue;
+
+			// The colour members first, then the alpha ones, which move.
+			usz first_alpha;
+			foreach (j, i : cluster)
 			{
-				EncBlock* b = &blocks[members[offs[c] + m]];
-				for (uint t = 0; t < 16; t++)
-				{
-					scratch[n * 3] = b.px[t][0];
-					scratch[n * 3 + 1] = b.px[t][1];
-					scratch[n * 3 + 2] = b.px[t][2];
-					n++;
-				}
+				if (blocks[i].alpha) continue;
+				@swap(cluster[j], cluster[first_alpha]);
+				first_alpha++;
 			}
-			eps[c] = fit_endpoint(scratch[:n * 3]);
+			uint twin = total++;
+			foreach (i : cluster[first_alpha..]) blocks[i].endpoint = twin;
+			eps[c] = fit_endpoint(gather_texels(scratch, blocks, cluster[:first_alpha]));
+			eps[twin] = fit_grey_endpoint(gather_texels(scratch, blocks, cluster[first_alpha..]));
 		}
+		eps = eps[:total];
+		num_e = total;
 	}
 
 	// Per-block best levels for the assigned endpoint.
@@ -1320,7 +1403,7 @@ fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality, uint th
 			ulong key = ((ulong)eps[c].color5[0] + eps[c].color5[1] + eps[c].color5[2]) * 8 + eps[c].inten5;
 			e_order[ne++] = (key << 32) | c;
 		}
-		sort::quicksort(e_order[:ne], fn int(ulong a, ulong b) => a < b ? -1 : (a > b ? 1 : 0));
+		sort::mergesort(e_order[:ne]);
 		Endpoint[] eps2 = alloc::new_array(tmem, Endpoint, (sz)ne);
 		for (uint c = 0; c < ne; c++)
 		{
@@ -1342,7 +1425,7 @@ fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality, uint th
 				| ((ulong)sels[c].rows[2] << 8) | sels[c].rows[3];
 			s_order[ns++] = (key << 32) | c;
 		}
-		sort::quicksort(s_order[:ns], fn int(ulong a, ulong b) => a < b ? -1 : (a > b ? 1 : 0));
+		sort::mergesort(s_order[:ns]);
 		Selector[] sels2 = alloc::new_array(tmem, Selector, (sz)ns);
 		for (uint c = 0; c < ns; c++)
 		{
@@ -1363,7 +1446,7 @@ fn Encoded? encode(Allocator allocator, EncSlice[] slices, uint quality, uint th
 	bool grayscale = true;
 	for (uint c = 0; c < num_e; c++)
 	{
-		if (eps[c].color5[0] != eps[c].color5[1] || eps[c].color5[0] != eps[c].color5[2])
+		if (!eps[c].is_grey())
 		{
 			grayscale = false;
 			break;

@@ -8,6 +8,7 @@
 // block to bit 128.
 module ktx::uastc;
 import ktx::bits, ktx::etc1s, ktx::parallel;
+import std::thread;
 
 faultdef INVALID_BLOCK, INVALID_SIZE;
 
@@ -593,45 +594,45 @@ const char[TOTAL_MODES + 1] MODE_CODES = {
 };
 
 // Per-range endpoint quantization: the packed BISE value (bits | digit<<bits)
-// whose unquantized byte is nearest each desired byte. Built on first use;
-// init is not thread-safe (call encode once before going parallel).
+// whose unquantized byte is nearest each desired byte. Built on first use,
+// once, by whichever thread encodes first.
 char[256][21] quant_lut @local;
-bool quant_ready @local = false;
+OnceFlag quant_once @local;
 
 fn void init_quant() @local
 {
-	if (quant_ready) return;
-	for (uint range = 0; range < 21; range++)
-	{
-		uint nbits = BISE_RANGE[range][0];
-		uint digits = 1;
-		if (BISE_RANGE[range][1] != 0) digits = 3;
-		if (BISE_RANGE[range][2] != 0) digits = 5;
-		// Trit/quint ranges without unquant params never appear as endpoint
-		// ranges (no mode uses them) — skip instead of tripping on them.
-		if (digits > 1 && UNQUANT_B[range].len == 0) continue;
-		for (uint want = 0; want < 256; want++)
+	quant_once.call(fn void() {
+		for (uint range = 0; range < 21; range++)
 		{
-			uint best;
-			int best_err = 256;
-			for (uint d = 0; d < digits; d++)
+			uint nbits = BISE_RANGE[range][0];
+			uint digits = 1;
+			if (BISE_RANGE[range][1] != 0) digits = 3;
+			if (BISE_RANGE[range][2] != 0) digits = 5;
+			// Trit/quint ranges without unquant params never appear as endpoint
+			// ranges (no mode uses them) — skip instead of tripping on them.
+			if (digits > 1 && UNQUANT_B[range].len == 0) continue;
+			for (uint want = 0; want < 256; want++)
 			{
-				for (uint b = 0; b < (1u << nbits); b++)
+				uint best;
+				int best_err = 256;
+				for (uint d = 0; d < digits; d++)
 				{
-					uint packed = b | (d << nbits);
-					int err = (int)unquant_endpoint(packed, range) - (int)want;
-					if (err < 0) err = -err;
-					if (err < best_err)
+					for (uint b = 0; b < (1u << nbits); b++)
 					{
-						best_err = err;
-						best = packed;
+						uint packed = b | (d << nbits);
+						int err = (int)unquant_endpoint(packed, range) - (int)want;
+						if (err < 0) err = -err;
+						if (err < best_err)
+						{
+							best_err = err;
+							best = packed;
+						}
 					}
 				}
+				quant_lut[range][want] = (char)best;
 			}
-			quant_lut[range][want] = (char)best;
 		}
-	}
-	quant_ready = true;
+	});
 }
 
 struct Trial @local
@@ -1461,7 +1462,6 @@ fn char[]? encode_image(Allocator allocator, char[] rgba, uint width, uint heigh
 	uint bh = (height + 3) / 4;
 	char[] out = alloc::new_array(allocator, char, (sz)((usz)bw * bh * 16));
 
-	init_quant();   // the lazy LUT init must not race the workers
 	EncodeJob job = { .rgba = rgba, .out = out, .width = width, .height = height, .bw = bw, .level = level };
 	parallel::run(bh, &job, &encode_row, threads);
 	return out;

@@ -20,6 +20,7 @@
 // library writes leave them zero.
 module ktx::uastc_bc7;
 import ktx::uastc, ktx::bc7, ktx::parallel;
+import std::thread;
 
 faultdef INVALID_SIZE;
 
@@ -62,7 +63,7 @@ char[256][2] solid_lo @local;
 char[256][2] solid_hi @local;
 char[256][2] solid_err @local;
 
-bool ready @local;
+OnceFlag tables_once @local;
 
 fn uint astc_weight(uint i, uint bits) @local
 {
@@ -122,100 +123,99 @@ fn PartMap find3(char[] pat, uint labels) @local
 }
 
 <*
- Build the requantization, weight-remap, partition and solid-block tables.
- Called once from `map_image` before it goes parallel; not thread-safe.
+ Build the requantization, weight-remap, partition and solid-block tables, once
+ per process, on whichever thread asks first: two images can be mapped on two
+ threads at once.
 *>
 fn void init() @local
 {
-	if (ready) return;
-
-	for (uint bits = 5; bits <= 7; bits++)
-	{
-		for (uint p = 0; p < 3; p++)
+	tables_once.call(fn void() {
+		for (uint bits = 5; bits <= 7; bits++)
 		{
+			for (uint p = 0; p < 3; p++)
+			{
+				for (uint t = 0; t < 256; t++)
+				{
+					uint best;
+					uint best_err = 1000;
+					for (uint v = 0; v < (1u << bits); v++)
+					{
+						uint d = p == QP_NONE ? bc7::dequant(v, bits) : bc7::dequant_p(v, p, bits);
+						uint err = d > t ? d - t : t - d;
+						if (err < best_err) { best_err = err; best = v; }
+					}
+					qval[bits][p][t] = (char)best;
+					qerr[bits][p][t] = (char)best_err;
+				}
+			}
+		}
+
+		for (uint db = 2; db <= 4; db++)
+		{
+			for (uint sb = 1; sb <= 5; sb++)
+			{
+				for (uint i = 0; i < (1u << sb); i++)
+				{
+					uint w = astc_weight(i, sb);
+					uint best;
+					uint best_err = 1000;
+					for (uint j = 0; j < (1u << db); j++)
+					{
+						uint bw = bc7::weight_val(db, j);
+						uint err = bw > w ? bw - w : w - bw;
+						if (err < best_err) { best_err = err; best = j; }
+					}
+					wremap[db - 2][sb - 1][i] = (char)best;
+				}
+			}
+		}
+
+		for (uint k = 0; k < uastc::TOTAL_PATTERNS2; k++) part2[k] = find2(uastc::PATTERNS2[k * 16 : 16]);
+		for (uint k = 0; k < uastc::TOTAL_PATTERNS3; k++) part3[k] = find3(uastc::PATTERNS3[k * 16 : 16], 3);
+		for (uint k = 0; k < uastc::TOTAL_PATTERNS2_3; k++) part23[k] = find3(uastc::PATTERNS2_3[k * 16 : 16], 2);
+
+		for (uint i = 0; i < 2; i++)
+		{
+			for (uint t = 0; t < 256; t++) solid_err[i][t] = 255;
+			uint w = bc7::WEIGHTS2[i];
+			for (uint lo = 0; lo < 128; lo++)
+			{
+				uint dl = bc7::dequant(lo, 7);
+				for (uint hi = 0; hi < 128; hi++)
+				{
+					uint v = bc7::interp(dl, bc7::dequant(hi, 7), w);
+					if (solid_err[i][v] != 0)
+					{
+						solid_err[i][v] = 0;
+						solid_lo[i][v] = (char)lo;
+						solid_hi[i][v] = (char)hi;
+					}
+				}
+			}
+			// Levels no pair hits exactly take the nearest one that is hit.
 			for (uint t = 0; t < 256; t++)
 			{
-				uint best;
-				uint best_err = 1000;
-				for (uint v = 0; v < (1u << bits); v++)
+				if (solid_err[i][t] == 0) continue;
+				for (uint d = 1; d < 256; d++)
 				{
-					uint d = p == QP_NONE ? bc7::dequant(v, bits) : bc7::dequant_p(v, p, bits);
-					uint err = d > t ? d - t : t - d;
-					if (err < best_err) { best_err = err; best = v; }
-				}
-				qval[bits][p][t] = (char)best;
-				qerr[bits][p][t] = (char)best_err;
-			}
-		}
-	}
-
-	for (uint db = 2; db <= 4; db++)
-	{
-		for (uint sb = 1; sb <= 5; sb++)
-		{
-			for (uint i = 0; i < (1u << sb); i++)
-			{
-				uint w = astc_weight(i, sb);
-				uint best;
-				uint best_err = 1000;
-				for (uint j = 0; j < (1u << db); j++)
-				{
-					uint bw = bc7::weight_val(db, j);
-					uint err = bw > w ? bw - w : w - bw;
-					if (err < best_err) { best_err = err; best = j; }
-				}
-				wremap[db - 2][sb - 1][i] = (char)best;
-			}
-		}
-	}
-
-	for (uint k = 0; k < uastc::TOTAL_PATTERNS2; k++) part2[k] = find2(uastc::PATTERNS2[k * 16 : 16]);
-	for (uint k = 0; k < uastc::TOTAL_PATTERNS3; k++) part3[k] = find3(uastc::PATTERNS3[k * 16 : 16], 3);
-	for (uint k = 0; k < uastc::TOTAL_PATTERNS2_3; k++) part23[k] = find3(uastc::PATTERNS2_3[k * 16 : 16], 2);
-
-	for (uint i = 0; i < 2; i++)
-	{
-		for (uint t = 0; t < 256; t++) solid_err[i][t] = 255;
-		uint w = bc7::WEIGHTS2[i];
-		for (uint lo = 0; lo < 128; lo++)
-		{
-			uint dl = bc7::dequant(lo, 7);
-			for (uint hi = 0; hi < 128; hi++)
-			{
-				uint v = bc7::interp(dl, bc7::dequant(hi, 7), w);
-				if (solid_err[i][v] != 0)
-				{
-					solid_err[i][v] = 0;
-					solid_lo[i][v] = (char)lo;
-					solid_hi[i][v] = (char)hi;
+					if (t >= d && solid_err[i][t - d] == 0)
+					{
+						solid_lo[i][t] = solid_lo[i][t - d];
+						solid_hi[i][t] = solid_hi[i][t - d];
+						solid_err[i][t] = (char)d;
+						break;
+					}
+					if (t + d < 256 && solid_err[i][t + d] == 0)
+					{
+						solid_lo[i][t] = solid_lo[i][t + d];
+						solid_hi[i][t] = solid_hi[i][t + d];
+						solid_err[i][t] = (char)d;
+						break;
+					}
 				}
 			}
 		}
-		// Levels no pair hits exactly take the nearest one that is hit.
-		for (uint t = 0; t < 256; t++)
-		{
-			if (solid_err[i][t] == 0) continue;
-			for (uint d = 1; d < 256; d++)
-			{
-				if (t >= d && solid_err[i][t - d] == 0)
-				{
-					solid_lo[i][t] = solid_lo[i][t - d];
-					solid_hi[i][t] = solid_hi[i][t - d];
-					solid_err[i][t] = (char)d;
-					break;
-				}
-				if (t + d < 256 && solid_err[i][t + d] == 0)
-				{
-					solid_lo[i][t] = solid_lo[i][t + d];
-					solid_hi[i][t] = solid_hi[i][t + d];
-					solid_err[i][t] = (char)d;
-					break;
-				}
-			}
-		}
-	}
-
-	ready = true;
+	});
 }
 
 <*
