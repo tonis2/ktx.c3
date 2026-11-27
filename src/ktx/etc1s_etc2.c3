@@ -13,6 +13,9 @@
  only on the alpha endpoint's level and table and on which of the four
  selectors the block uses, so it is searched once per such key an image asks
  for and looked up per block, as ktx::etc1s_bc7 does for BC7.
+
+ `encode_image` writes the same blocks from RGBA8 pixels, each block fitted as
+ ETC1S would fit it with a codebook entry of its own.
 *>
 module ktx::etc1s_etc2;
 import ktx::etc1s, ktx::etc2, ktx::parallel;
@@ -365,5 +368,146 @@ fn char[]? map_image(Allocator allocator, etc1s::Codebook* cb, char[] rgb_slice,
 
 	job.out = alloc::new_array(allocator, char, (sz)(count * target.block_bytes));
 	parallel::run(nby, &job, &map_row, parallel::shares(count, MIN_BLOCKS_PER_THREAD, threads));
+	return job.out;
+}
+
+struct EncodeJob @local
+{
+	char[] rgba;
+	uint width;
+	uint height;
+	uint nbx;
+	etc1s::Endpoint[] colour_ep;
+	etc1s::Selector[] colour_sel;
+	// Empty for ETC1_RGB.
+	etc1s::Endpoint[] alpha_ep;
+	etc1s::Selector[] alpha_sel;
+	bool[] opaque;
+	Eac[] eac;   // by alpha key
+	char[] out;
+	Target target;
+}
+
+fn void fit_row(void* ctx, usz by) @local
+{
+	EncodeJob* j = (EncodeJob*)ctx;
+	for (uint bx = 0; bx < j.nbx; bx++)
+	{
+		usz i = by * j.nbx + bx;
+		char[3][16] px;
+		char[3][16] alpha;
+		bool opaque = true;
+		for (uint t = 0; t < 16; t++)
+		{
+			// Past the edge the last column or row repeats; the decoder crops it.
+			uint x = min(bx * 4 + (t & 3), j.width - 1);
+			uint y = min((uint)by * 4 + (t >> 2), j.height - 1);
+			char* p = &j.rgba[((usz)y * j.width + x) * 4];
+			px[t] = { p[0], p[1], p[2] };
+			alpha[t] = { p[3], p[3], p[3] };
+			if (p[3] != 255) opaque = false;
+		}
+		j.colour_ep[i] = etc1s::fit_block(&px, false, &j.colour_sel[i]);
+		if (!j.alpha_ep.len) continue;
+		j.opaque[i] = opaque;
+		if (!opaque) j.alpha_ep[i] = etc1s::fit_block(&alpha, true, &j.alpha_sel[i]);
+	}
+}
+
+fn void pack_row(void* ctx, usz by) @local
+{
+	EncodeJob* j = (EncodeJob*)ctx;
+	uint bytes = j.target.block_bytes;
+	for (uint bx = 0; bx < j.nbx; bx++)
+	{
+		usz i = by * j.nbx + bx;
+		char* out = &j.out[i * bytes];
+		if (j.target == ETC2_RGBA)
+		{
+			if (j.opaque[i])
+			{
+				out[:8] = OPAQUE_ALPHA[..];
+			}
+			else
+			{
+				etc1s::Selector sel = j.alpha_sel[i];
+				pack_eac(&j.eac[alpha_key(j.alpha_ep[i], sel_mask(sel))], sel, out);
+			}
+			out += 8;
+		}
+		pack_etc1(j.colour_ep[i], etc1_indices(j.colour_sel[i]), out);
+	}
+}
+
+// A fit searches 216 endpoints a block, so a thread earns its start sooner than a
+// mapper's does.
+const usz MIN_FIT_BLOCKS_PER_THREAD @local = 256;
+
+<*
+ RGBA8 pixels straight to ETC1 or ETC2 RGBA blocks, with no ETC1S file between.
+
+ Each block gets the endpoint and selector an ETC1S encoder would give it with a
+ codebook entry of its own, and is then packed as `map_image` packs a file's:
+ so it is ETC1S's quality without the clustering, which is where an ETC1S encode
+ spends its time. That suits pixels the caller made, such as mip levels a file
+ did not ship, which would otherwise be encoded to ETC1S only to be mapped. A
+ block whose alpha is all 255 gets the opaque EAC block.
+
+ @param [&inout] allocator : "Where the blocks are allocated"
+ @param [in] rgba : "width * height RGBA8 texels, row by row"
+ @param target : "ETC1 colour alone, or EAC alpha and ETC1 colour"
+ @param [&inout] scratch : "Holds the per-block fits and the EAC table until the call returns"
+ @param threads : "Thread count: 0 decides from the job's size, 1 runs inline. The output is identical either way."
+ @require (usz)rgba.len == (usz)width * height * 4 : "Not width x height RGBA8"
+ @return "ceil(width / 4) * ceil(height / 4) blocks of target.block_bytes, row by row"
+ @return? INVALID_SIZE
+*>
+fn char[]? encode_image(Allocator allocator, char[] rgba, uint width, uint height, Target target,
+	Allocator scratch, uint threads = 0)
+{
+	uint nbx = (width + 3) / 4;
+	uint nby = (height + 3) / 4;
+	if (!nbx || !nby) return INVALID_SIZE~;
+	usz count = (usz)nbx * nby;
+
+	EncodeJob job = {
+		.rgba = rgba,
+		.width = width,
+		.height = height,
+		.nbx = nbx,
+		.colour_ep = alloc::new_array(scratch, etc1s::Endpoint, (sz)count),
+		.colour_sel = alloc::new_array(scratch, etc1s::Selector, (sz)count),
+		.target = target,
+	};
+	if (target == ETC2_RGBA)
+	{
+		job.alpha_ep = alloc::new_array(scratch, etc1s::Endpoint, (sz)count);
+		job.alpha_sel = alloc::new_array(scratch, etc1s::Selector, (sz)count);
+		job.opaque = alloc::new_array(scratch, bool, (sz)count);
+	}
+	parallel::run(nby, &job, &fit_row, parallel::shares(count, MIN_FIT_BLOCKS_PER_THREAD, threads));
+
+	if (target == ETC2_RGBA)
+	{
+		// The EAC search once per alpha key, as `map_image` runs it.
+		init();
+		bool[KEYS] seen;
+		uint[] keys = alloc::alloc_array(scratch, uint, (sz)KEYS);
+		usz n;
+		foreach (i, ep : job.alpha_ep)
+		{
+			if (job.opaque[i]) continue;
+			uint key = alpha_key(ep, sel_mask(job.alpha_sel[i]));
+			if (seen[key]) continue;
+			seen[key] = true;
+			keys[n++] = key;
+		}
+		job.eac = alloc::alloc_array(scratch, Eac, (sz)KEYS);
+		PrepJob prep = { .keys = keys[:n], .eac = job.eac };
+		parallel::run(n, &prep, &prep_key, parallel::shares(n, MIN_KEYS_PER_THREAD, threads));
+	}
+
+	job.out = alloc::new_array(allocator, char, (sz)(count * target.block_bytes));
+	parallel::run(nby, &job, &pack_row, parallel::shares(count, MIN_BLOCKS_PER_THREAD, threads));
 	return job.out;
 }

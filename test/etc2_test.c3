@@ -3,6 +3,7 @@
 // it decoded, and what the mapper promises, without needing it.
 module etc2_testutil;
 import ktx::etc1s, ktx::etc2, ktx::basis;
+import std::math;
 
 <* An EAC block with every texel on one index. *>
 fn char[8] eac_block(char base, uint mul, uint table, uint idx)
@@ -65,6 +66,23 @@ fn void compare_level(char[] ktx2, uint level, ulong* err_sum, usz* texels, int*
 	{
 		assert(rgb.data[b * 8 : 8] == rgba.data[b * 16 + 8 : 8], "level %d block %d", level, b);
 	}
+}
+
+<* Root mean square difference over channels `lo` to `hi` of two RGBA8 images. *>
+fn double rmse(char[] a, char[] b, uint lo, uint hi)
+{
+	double sum;
+	usz n;
+	for (usz i = 0; i < a.len; i += 4)
+	{
+		for (uint c = lo; c <= hi; c++)
+		{
+			double d = (double)a[i + c] - (double)b[i + c];
+			sum += d * d;
+			n++;
+		}
+	}
+	return math::sqrt(sum / (double)n);
 }
 
 module etc2_tests @test;
@@ -358,4 +376,86 @@ fn void an_etc2_file_describes_itself()
 	test::eq(dfd::model_name(info.dfd.model), "ETC2");
 	test::eq(info.dfd.sample_count, 2u);
 	test::eq(info.levels[0].uncompressed, 64ul);
+}
+
+<*
+ The direct encoder against an ETC1S encode of the same pixels, both read back
+ through the ETC2 decoder. A block fitted on its own should not lose to one
+ sharing a codebook, and it gets there without the clustering.
+*>
+fn void encoded_colour_is_no_worse_than_an_etc1s_file() => @pool()
+{
+	String[4] images = { "gradient", "detail", "gray", "normal" };
+	foreach (name : images)
+	{
+		image::Image src = cli::load_image(tmem, string::tformat("test/images/%s.png", name))!!;
+		char[] blocks = etc1s_etc2::encode_image(tmem, src.pixels, src.width, src.height, ETC1_RGB, tmem)!!;
+		char[] got = etc2::decode(tmem, RGB, blocks, src.width, src.height)!!;
+
+		char[][1] imgs = { src.pixels };
+		char[] ktx2 = basis::encode(tmem, basis::ETC1S, imgs[..], src.width, src.height, basis::TexType.D2,
+			{ .quality = 100, .effort = 2, .srgb = true, .mipmaps = false })!!;
+		char[] file = basis::transcode(tmem, ktx2, 0, 0, 0, basis::TF_RGBA32, 4)!!.data;
+
+		double mine = etc2_testutil::rmse(got, src.pixels, 0, 2);
+		double theirs = etc2_testutil::rmse(file, src.pixels, 0, 2);
+		io::printfn("  %s %dx%d: direct rmse %.3f, ETC1S q100 %.3f", name, src.width, src.height, mine, theirs);
+		assert(mine <= theirs * 1.02, "%s: the direct fit is %.3f off, an ETC1S file %.3f", name, mine, theirs);
+	}
+}
+
+<*
+ EAC alpha from pixels: near the picture's own alpha, and exactly 255 in a block
+ that is opaque. 30x18 so the last column and row of blocks are partial.
+*>
+fn void encoded_alpha_follows_the_pixels() => @pool()
+{
+	const uint W = 30;
+	const uint H = 18;
+	char[W * H * 4] rgba;
+	for (uint y = 0; y < H; y++)
+	{
+		for (uint x = 0; x < W; x++)
+		{
+			usz at = ((usz)y * W + x) * 4;
+			rgba[at + 0] = (char)(x * 8);
+			rgba[at + 1] = (char)(y * 13);
+			rgba[at + 2] = (char)(255 - x * 4 - y * 3);
+			// Blocks from x = 16 on are opaque.
+			rgba[at + 3] = x >= 16 ? 255 : (char)(x * 15 + y * 2);
+		}
+	}
+	char[] blocks = etc1s_etc2::encode_image(tmem, rgba[..], W, H, ETC2_RGBA, tmem)!!;
+	assert(blocks.len == 8 * 5 * 16, "%d bytes for 8x5 blocks", blocks.len);
+	char[] got = etc2::decode(tmem, RGBA, blocks, W, H)!!;
+
+	// The gradients are steeper than one ETC1S colour a block follows, so both are
+	// held to what an ETC1S file of the same pixels decodes to.
+	char[][1] imgs = { rgba[..] };
+	char[] ktx2 = basis::encode(tmem, basis::ETC1S, imgs[..], W, H, basis::TexType.D2,
+		{ .quality = 100, .effort = 2, .srgb = true, .mipmaps = false })!!;
+	char[] file = basis::transcode(tmem, ktx2, 0, 0, 0, basis::TF_RGBA32, 4)!!.data;
+
+	double colour = etc2_testutil::rmse(got, rgba[..], 0, 2);
+	double alpha = etc2_testutil::rmse(got, rgba[..], 3, 3);
+	double file_colour = etc2_testutil::rmse(file, rgba[..], 0, 2);
+	double file_alpha = etc2_testutil::rmse(file, rgba[..], 3, 3);
+	io::printfn("  30x18: colour rmse %.3f (ETC1S %.3f), alpha rmse %.3f (ETC1S %.3f)", colour, file_colour, alpha, file_alpha);
+	assert(colour <= file_colour * 1.02, "colour rmse %.3f against ETC1S's %.3f", colour, file_colour);
+	// EAC carries the alpha within 3 of ETC1S's levels.
+	assert(alpha <= file_alpha + 3, "alpha rmse %.3f against ETC1S's %.3f", alpha, file_alpha);
+	for (uint y = 0; y < H; y++)
+	{
+		for (uint x = 16; x < W; x++) assert(got[((usz)y * W + x) * 4 + 3] == 255, "texel %d,%d of an opaque block", x, y);
+	}
+}
+
+<* Alpha included, so the EAC search runs across threads as well as the block rows. *>
+fn void encode_threads_do_not_change_the_blocks() => @pool()
+{
+	char[64 * 64 * 4] rgba;
+	foreach (i, &c : rgba) *c = (char)((i * 2654435761) >> 13);
+	char[] one = etc1s_etc2::encode_image(tmem, rgba[..], 64, 64, ETC2_RGBA, tmem, 1)!!;
+	char[] many = etc1s_etc2::encode_image(tmem, rgba[..], 64, 64, ETC2_RGBA, tmem, 8)!!;
+	assert(one == many);
 }

@@ -583,6 +583,44 @@ fn Endpoint fit_grey_endpoint(char[] rgb) @local
 	return best;
 }
 
+<*
+ One block's own endpoint and selector, with no codebook to share: what an ETC1S
+ file would hold for the block if every block had entries of its own.
+
+ @param [&in] px : "The block's 16 texels as RGB triples, row by row; an alpha block's as (a, a, a)"
+ @param grey : "Fit on the grey diagonal, where an alpha block's endpoint must lie"
+ @param [&out] sel : "The block's selector"
+ @return "The block's endpoint"
+*>
+fn Endpoint fit_block(char[3][16]* px, bool grey, Selector* sel)
+{
+	char[] rgb = ((char*)px)[:48];
+	Endpoint ep = grey ? fit_grey_endpoint(rgb) : fit_endpoint(rgb);
+	char[3][4] colors;
+	endpoint_colors(ep, &colors);
+	Selector out;
+	for (uint i = 0; i < 16; i++)
+	{
+		uint best = uint::max;
+		uint level;
+		for (uint l = 0; l < 4; l++)
+		{
+			uint e;
+			for (uint c = 0; c < 3; c++)
+			{
+				int d = (int)colors[l][c] - (int)(*px)[i][c];
+				e += (uint)(d * d);
+			}
+			if (e >= best) continue;
+			best = e;
+			level = l;
+		}
+		out.rows[i >> 2] |= (char)(level << ((i & 3) * 2));
+	}
+	*sel = out;
+	return ep;
+}
+
 <* The member blocks' texels as RGB triples, written into `out`. *>
 fn char[] gather_texels(char[] out, EncBlock[] blocks, uint[] members) @local
 {
